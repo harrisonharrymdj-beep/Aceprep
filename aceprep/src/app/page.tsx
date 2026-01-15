@@ -1,8 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import * as pdfjsLib from "pdfjs-dist";
 
-const adDurationMs = 15000; // 15s ad (change to 8000–15000)
+const adDurationMs = 15000; // 15s ad
+const DAILY_FREE_LIMIT = 5;
 
 type ToolName =
   | "Study Guide"
@@ -22,23 +24,23 @@ export default function Home() {
   const [profEmphasis, setProfEmphasis] = useState("");
 
   const [loading, setLoading] = useState(false);
-  const [output, setOutput] = useState<string>("Generated content will appear here.");
+  const [output, setOutput] = useState("Generated content will appear here.");
   const [error, setError] = useState<string | null>(null);
 
   const toolDescription = useMemo(() => {
     switch (tool) {
       case "Study Guide":
         return "Turn notes into a clean, exam-ready study guide.";
-      case "Exam Pack":
-        return "Generate practice questions + answers from your materials.";
       case "Formula Sheet":
         return "Extract formulas, definitions, and key relationships.";
       case "Homework Explain":
-        return "Explain concepts step-by-step (without doing dishonest submission).";
+        return "Explain concepts step-by-step.";
       case "Essay Outline":
-        return "Create a thesis + outline + key points from prompts or readings.";
+        return "Create a thesis + outline + key points.";
+      case "Exam Pack":
+        return "Generate practice questions (Pro only).";
       default:
-        return "Generate something you’d actually study.";
+        return "";
     }
   }, [tool]);
 
@@ -47,42 +49,49 @@ export default function Home() {
     setIsModalOpen(true);
   }
 
-function startMockAd() {
-  if (isWatchingAd) return;
+  function checkDailyLimit() {
+    const today = new Date().toDateString();
+    const key = `aceprep_free_${today}`;
+    const used = Number(localStorage.getItem(key) ?? 0);
 
-  if (!notes.trim()) {
-    setError("Paste some notes first.");
-    return;
+    if (used >= DAILY_FREE_LIMIT) {
+      setError("Daily free limit reached (5/day). Try again tomorrow or go Pro.");
+      return false;
+    }
+
+    localStorage.setItem(key, String(used + 1));
+    return true;
   }
 
-  setIsWatchingAd(true);
-  setError(null);
-  setAdSecondsLeft(Math.ceil(adDurationMs / 1000));
-
-  // Start generation immediately (background)
-  runGeneration(); // DO NOT await this
-
-  const start = Date.now();
-  const timer = setInterval(() => {
-    const elapsed = Date.now() - start;
-    const remaining = Math.max(0, Math.ceil((adDurationMs - elapsed) / 1000));
-    setAdSecondsLeft(remaining);
-
-    if (elapsed >= adDurationMs) {
-      clearInterval(timer);
-
-      // End ad immediately when timer finishes
-      setIsWatchingAd(false);
-      setIsModalOpen(false);
+  function startMockAd() {
+    if (isWatchingAd) return;
+    if (!notes.trim()) {
+      setError("Paste notes or upload a PDF first.");
+      return;
     }
-  }, 250);
-}
+    if (!checkDailyLimit()) return;
 
+    setIsWatchingAd(true);
+    setAdSecondsLeft(Math.ceil(adDurationMs / 1000));
+
+    runGeneration(); // background
+
+    const start = Date.now();
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - start;
+      setAdSecondsLeft(Math.max(0, Math.ceil((adDurationMs - elapsed) / 1000)));
+
+      if (elapsed >= adDurationMs) {
+        clearInterval(timer);
+        setIsWatchingAd(false);
+        setIsModalOpen(false);
+      }
+    }, 250);
+  }
 
   async function runGeneration() {
     try {
       setLoading(true);
-      setError(null);
       setOutput("Generating…");
 
       const res = await fetch("/api/generate", {
@@ -91,193 +100,122 @@ function startMockAd() {
         body: JSON.stringify({
           tool,
           notes,
-          options: {
-            examType,
-            profEmphasis,
-          },
+          options: { examType, profEmphasis },
         }),
       });
 
       const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data?.error ?? "Generation failed.");
-      }
+      if (!res.ok) throw new Error(data?.error ?? "Generation failed.");
 
       setOutput(data.output ?? "No output returned.");
     } catch (e: any) {
-      setError(e?.message ?? "Something went wrong.");
+      setError(e.message);
       setOutput("Generated content will appear here.");
     } finally {
       setLoading(false);
     }
   }
 
-  async function copyOutput() {
+  async function handlePdfUpload(file: File) {
+    setError(null);
     try {
-      await navigator.clipboard.writeText(output);
+      const buffer = await file.arrayBuffer();
+      const pdf = await (pdfjsLib as any).getDocument({ data: buffer }).promise;
+
+      let text = "";
+      const maxPages = Math.min(pdf.numPages, 10);
+
+      for (let i = 1; i <= maxPages; i++) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        text += content.items.map((it: any) => it.str).join(" ") + "\n";
+      }
+
+      setNotes((prev) => (prev ? prev + "\n\n" : "") + text.slice(0, 30000));
     } catch {
-      // ignore
+      setError("Could not read PDF. Make sure it has selectable text (not scanned).");
     }
   }
 
   return (
     <div className="min-h-screen bg-zinc-100 text-black">
-      {/* TOP NAV */}
       <header className="flex items-center justify-between border-b bg-white px-6 py-4">
-        <div className="flex items-center gap-4">
-          <span className="text-xl font-semibold">AcePrep</span>
-
-          <select
-            value={tool}
-            onChange={(e) => setTool(e.target.value as ToolName)}
-            className="rounded-md border px-3 py-1 text-sm"
-          >
-            <option>Study Guide</option>
-            <option>Exam Pack</option>
-            <option>Formula Sheet</option>
-            <option>Homework Explain</option>
-            <option>Essay Outline</option>
-          </select>
-        </div>
-
-        <div className="flex items-center gap-3">
+        <span className="text-xl font-semibold">AcePrep</span>
+        <div className="flex gap-3">
           <button className="rounded-md border px-4 py-1.5 text-sm">Login / Sign Up</button>
           <button className="rounded-md border px-3 py-1.5 text-sm">☰</button>
         </div>
       </header>
 
-      {/* MAIN LAYOUT */}
-      <div className="mx-auto grid max-w-7xl grid-cols-12 gap-4 px-4 py-6">
-        {/* LEFT ADS */}
-        <aside className="col-span-12 hidden md:col-span-3 md:block">
-          <div className="sticky top-24 rounded-xl border bg-white p-4">
-            <p className="mb-2 text-sm font-medium text-zinc-600">Sponsored</p>
-            <div className="h-64 rounded-lg border bg-zinc-50" />
-          </div>
-        </aside>
-
-        {/* CENTER TOOL */}
-        <main className="col-span-12 md:col-span-6">
-          <div className="rounded-xl border bg-white p-6 shadow-sm">
-            <h1 className="mb-1 text-xl font-semibold">{tool}</h1>
-            <p className="mb-4 text-sm text-zinc-600">{toolDescription}</p>
-
-            {/* INPUT TEXT (fast MVP) */}
-            <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
-              <label className="mb-2 block text-sm font-medium">Paste notes / prompt</label>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Paste lecture notes, slides text, or a prompt here…"
-                className="h-32 w-full resize-none rounded-md border bg-white px-3 py-2 text-sm"
-              />
-              <p className="mt-1 text-xs text-zinc-500">
-                File upload is next — for now paste text to test the full flow.
-              </p>
-            </div>
-
-            {/* OPTIONS */}
-            <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
-              <label className="mb-2 block text-sm font-medium">Options</label>
-              <input
-                value={examType}
-                onChange={(e) => setExamType(e.target.value)}
-                placeholder="Exam type (MC, FR, mixed)"
-                className="mb-2 w-full rounded-md border px-3 py-2 text-sm"
-              />
-              <input
-                value={profEmphasis}
-                onChange={(e) => setProfEmphasis(e.target.value)}
-                placeholder="Professor emphasis (conceptual, calculation-heavy)"
-                className="w-full rounded-md border px-3 py-2 text-sm"
-              />
-            </div>
-
-            {/* GENERATE */}
+      <div className="mx-auto max-w-3xl px-4 py-6">
+        {/* DOCUMENT TYPE */}
+        <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
+          <label className="mb-2 block text-sm font-medium">Document type</label>
+          <div className="grid grid-cols-2 gap-2">
+            {["Study Guide", "Formula Sheet", "Homework Explain", "Essay Outline"].map((t) => (
+              <button
+                key={t}
+                onClick={() => setTool(t as ToolName)}
+                className={`rounded-md border px-3 py-2 text-sm ${
+                  tool === t ? "bg-black text-white" : "bg-white"
+                }`}
+              >
+                {t}
+              </button>
+            ))}
             <button
-              onClick={onGenerateClick}
-              disabled={loading}
-              className="mb-3 w-full rounded-lg bg-black py-3 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+              disabled
+              className="rounded-md border px-3 py-2 text-sm bg-white opacity-50 cursor-not-allowed"
             >
-              {loading ? "Generating…" : "Generate ▶"}
+              Exam Pack 🔒
             </button>
-
-            {error && (
-              <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                {error}
-              </div>
-            )}
-
-            {/* OUTPUT */}
-            <div className="rounded-lg border bg-zinc-50 p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-sm font-medium">Output</span>
-                <div className="flex gap-2">
-                  <button onClick={copyOutput} className="rounded-md border px-2 py-1 text-xs">
-                    Copy
-                  </button>
-                  <button className="rounded-md border px-2 py-1 text-xs" disabled>
-                    Export (soon)
-                  </button>
-                </div>
-              </div>
-              <pre className="h-64 overflow-auto whitespace-pre-wrap rounded-md border bg-white p-3 text-sm text-zinc-800">
-                {output}
-              </pre>
-            </div>
           </div>
-        </main>
+          <p className="mt-2 text-xs text-zinc-500">Exam Pack is Pro-only.</p>
+        </div>
 
-        {/* RIGHT ADS */}
-        <aside className="col-span-12 hidden md:col-span-3 md:block">
-          <div className="sticky top-24 rounded-xl border bg-white p-4">
-            <p className="mb-2 text-sm font-medium text-zinc-600">Ads</p>
-            <div className="h-64 rounded-lg border bg-zinc-50" />
-          </div>
-        </aside>
+        {/* NOTES + PDF */}
+        <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
+          <label className="mb-2 block text-sm font-medium">Paste notes or upload PDF</label>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            className="h-32 w-full resize-none rounded-md border px-3 py-2 text-sm"
+          />
+          <input
+            type="file"
+            accept="application/pdf"
+            onChange={(e) => e.target.files && handlePdfUpload(e.target.files[0])}
+            className="mt-2 text-sm"
+          />
+        </div>
+
+        <button
+          onClick={onGenerateClick}
+          className="w-full rounded-lg bg-black py-3 text-sm font-medium text-white"
+        >
+          Generate ▶
+        </button>
+
+        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+
+        <pre className="mt-4 h-64 overflow-auto rounded-md border bg-white p-3 text-sm">
+          {output}
+        </pre>
       </div>
 
-      {/* AD GATE MODAL */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
-            <div className="mb-2 text-lg font-semibold">Watch a short ad to generate</div>
-            <div className="mb-4 text-sm text-zinc-600">
-              Free users watch a quick ad. Pro users generate instantly (we’ll add that later).
-            </div>
-
-            <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
-              <div className="text-sm font-medium text-zinc-700">Mock Ad</div>
-              <div className="mt-2 h-24 rounded-md border bg-white" />
-              {isWatchingAd && (
-                <div className="mt-2 text-sm text-zinc-600">
-                  Ad ends in <span className="font-semibold">{adSecondsLeft}</span>s…
-                </div>
-              )}
-              {isWatchingAd && (
-                <div className="mt-1 text-xs text-zinc-500">
-                  Generating in the background…
-                </div>
-              )}
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => setIsModalOpen(false)}
-                disabled={isWatchingAd}
-                className="flex-1 rounded-lg border px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={startMockAd}
-                disabled={isWatchingAd}
-                className="flex-1 rounded-lg bg-black px-4 py-2 text-sm text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
-              >
-                {isWatchingAd ? "Watching…" : `Watch Ad (${Math.ceil(adDurationMs / 1000)}s)`}
-              </button>
-            </div>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center">
+          <div className="bg-white p-5 rounded-xl w-full max-w-md">
+            <p className="font-semibold mb-2">Watch a short ad</p>
+            <div className="h-24 border mb-2" />
+            {isWatchingAd && <p>Ad ends in {adSecondsLeft}s…</p>}
+            <button
+              onClick={startMockAd}
+              disabled={isWatchingAd}
+              className="mt-3 w-full bg-black text-white py-2 rounded-lg"
+            >
+              Watch Ad (15s)
+            </button>
           </div>
         </div>
       )}
