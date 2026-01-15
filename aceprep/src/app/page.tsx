@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 
-const adDurationMs = 12000; // 12s ad (change to 8000–15000)
+const adDurationMs = 15000; // 15s ad (change to 8000–15000)
 
 type ToolName =
   | "Study Guide"
@@ -59,27 +59,24 @@ function startMockAd() {
   setError(null);
   setAdSecondsLeft(Math.ceil(adDurationMs / 1000));
 
-  // Start generating immediately (in the background)
-  const generationPromise = runGeneration();
+  // Start generation immediately (background)
+  runGeneration(); // DO NOT await this
 
   const start = Date.now();
-  const timer = setInterval(async () => {
+  const timer = setInterval(() => {
     const elapsed = Date.now() - start;
     const remaining = Math.max(0, Math.ceil((adDurationMs - elapsed) / 1000));
     setAdSecondsLeft(remaining);
 
     if (elapsed >= adDurationMs) {
       clearInterval(timer);
-      try {
-        await generationPromise;
-      } finally {
-        setIsWatchingAd(false);
-        setIsModalOpen(false);
-      }
+
+      // End ad immediately when timer finishes
+      setIsWatchingAd(false);
+      setIsModalOpen(false);
     }
   }, 250);
 }
-
 
 
   async function runGeneration() {
