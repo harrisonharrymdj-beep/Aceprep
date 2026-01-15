@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 
+const adDurationMs = 12000; // 12s ad (change to 8000–15000)
+
 type ToolName =
   | "Study Guide"
   | "Exam Pack"
@@ -45,26 +47,40 @@ export default function Home() {
     setIsModalOpen(true);
   }
 
-  function startMockAd() {
-    setIsWatchingAd(true);
-    setAdSecondsLeft(5);
+function startMockAd() {
+  if (isWatchingAd) return;
 
-    const start = Date.now();
-    const durationMs = 5000;
+  if (!notes.trim()) {
+    setError("Paste some notes first.");
+    return;
+  }
 
-    const timer = setInterval(() => {
-      const elapsed = Date.now() - start;
-      const remaining = Math.max(0, Math.ceil((durationMs - elapsed) / 1000));
-      setAdSecondsLeft(remaining);
+  setIsWatchingAd(true);
+  setError(null);
+  setAdSecondsLeft(Math.ceil(adDurationMs / 1000));
 
-      if (elapsed >= durationMs) {
-        clearInterval(timer);
+  // Start generating immediately (in the background)
+  const generationPromise = runGeneration();
+
+  const start = Date.now();
+  const timer = setInterval(async () => {
+    const elapsed = Date.now() - start;
+    const remaining = Math.max(0, Math.ceil((adDurationMs - elapsed) / 1000));
+    setAdSecondsLeft(remaining);
+
+    if (elapsed >= adDurationMs) {
+      clearInterval(timer);
+      try {
+        await generationPromise;
+      } finally {
         setIsWatchingAd(false);
         setIsModalOpen(false);
-        void runGeneration();
       }
-    }, 250);
-  }
+    }
+  }, 250);
+}
+
+
 
   async function runGeneration() {
     try {
@@ -242,6 +258,11 @@ export default function Home() {
                   Ad ends in <span className="font-semibold">{adSecondsLeft}</span>s…
                 </div>
               )}
+              {isWatchingAd && (
+                <div className="mt-1 text-xs text-zinc-500">
+                  Generating in the background…
+                </div>
+              )}
             </div>
 
             <div className="flex gap-2">
@@ -257,7 +278,7 @@ export default function Home() {
                 disabled={isWatchingAd}
                 className="flex-1 rounded-lg bg-black px-4 py-2 text-sm text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
               >
-                {isWatchingAd ? "Watching…" : "Watch Ad (5s)"}
+                {isWatchingAd ? "Watching…" : `Watch Ad (${Math.ceil(adDurationMs / 1000)}s)`}
               </button>
             </div>
           </div>
