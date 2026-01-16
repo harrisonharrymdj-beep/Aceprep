@@ -139,8 +139,9 @@ async function handlePdfUpload(file: File) {
     }
 
     setNotes((prev) => (prev ? prev + "\n\n" : "") + text.slice(0, 30000));
-  } catch (e) {
-    setError("Could not read PDF. Make sure it has selectable text (not scanned).");
+  } catch (e: any) {
+  console.error(e);
+  setError(`PDF read failed: ${e?.message ?? String(e)}`);
   }
 }
 
