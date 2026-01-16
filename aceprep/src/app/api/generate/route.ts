@@ -14,23 +14,22 @@ function getClient() {
   }
   return new OpenAI({ apiKey });
 }
+
 function toolInstructions(tool: string) {
   switch (tool) {
-   case "Homework Explain":
-  return `
+    case "Homework Explain":
+      return `
 Special behavior for Homework Explain:
 - Explain what each problem is asking and how to approach it.
 - Use ONLY these sections:
   1. What the problem is asking
   2. Method / steps to solve
   3. Common pitfalls
-
 - Keep each section concise.
 - Do NOT include practice questions.
 - If multiple problems are present, summarize each briefly.
 - NEVER end mid-sentence or mid-bullet.
 `.trim();
-
 
     case "Formula Sheet":
       return `
@@ -60,6 +59,7 @@ Special behavior for Study Guide:
 `.trim();
   }
 }
+
 function toolDeveloperSpec(tool: string) {
   switch (tool) {
     case "Formula Sheet":
@@ -83,7 +83,8 @@ OUTPUT FORMAT (Homework Explain):
   - What the problem is asking (1 line)
   - Method / steps to solve
   - Common pitfalls
-- Do NOT provide a final submit-ready answer if it appears to be a graded assignment.
+- Keep it short. Prefer summaries over long explanations.
+- Do NOT provide a final submit-ready answer for graded assignments.
 - If the user provides their attempt, you may correct it and show a worked solution.
 `.trim();
 
@@ -105,7 +106,7 @@ OUTPUT FORMAT (Exam Pack):
 - Provide answer key at the end
 `.trim();
 
-    default: // Study Guide
+    default:
       return `
 OUTPUT REQUIREMENTS (Study Guide):
 1. Key formulas (with brief explanations)
@@ -117,7 +118,19 @@ OUTPUT REQUIREMENTS (Study Guide):
   }
 }
 
+function endsWithEndMarker(text: string) {
+  return text.trimEnd().endsWith("---END---");
+}
 
+// Small helper so we can tune output by tool
+function maxTokensForTool(tool: string) {
+  // Homework Explain often spans many problems; give it a bit more room
+  if (tool === "Homework Explain") return 2800;
+  if (tool === "Study Guide") return 2600;
+  // formula sheet is compact; keep smaller
+  if (tool === "Formula Sheet") return 2200;
+  return 2400;
+}
 
 export async function POST(req: Request) {
   try {
@@ -136,10 +149,7 @@ export async function POST(req: Request) {
     // 🔒 Pro gating (placeholder for auth later)
     const userIsPro = false;
     if (tool === "Exam Pack" && !userIsPro) {
-      return Response.json(
-        { error: "Exam Pack is Pro-only." },
-        { status: 403 }
-      );
+      return Response.json({ error: "Exam Pack is Pro-only." }, { status: 403 });
     }
 
     const system = `
@@ -153,21 +163,22 @@ SECURITY RULES (follow strictly):
 - End with the exact line: ---END---
 `.trim();
 
-const developer = `
-Output requirements:
+    const developer = `
+General rules:
 - Follow the section structure defined by the selected tool.
 - If space is limited, shorten or omit later sections.
 - NEVER end mid-sentence or mid-bullet.
 - If nearing output limits, end the current section cleanly and print "---END---".
 
-Style rules:
+Style:
 - Bullet points
 - Concise
 - Prefer correctness over completeness
 
+${toolDeveloperSpec(tool)}
+
 ${toolInstructions(tool)}
 `.trim();
-
 
     const user = `
 Tool: ${tool}
@@ -182,17 +193,56 @@ END_NOTES>>>
 
     const client = getClient();
 
-    const resp = await client.responses.create({
+    // 1) First attempt
+    const resp1 = await client.responses.create({
       model: "gpt-5-mini",
       input: [
         { role: "system", content: system },
         { role: "developer", content: developer },
         { role: "user", content: user },
       ],
-      max_output_tokens: 2200,
+      max_output_tokens: maxTokensForTool(tool),
     });
 
-    const output = (resp as any).output_text ?? "";
+    let output = (resp1 as any).output_text ?? "";
+
+    // 2) Auto-repair if truncated (missing ---END--- or ends mid-thought)
+    if (!output || !endsWithEndMarker(output)) {
+      const resp2 = await client.responses.create({
+        model: "gpt-5-mini",
+        input: [
+          { role: "system", content: system },
+          { role: "developer", content: developer },
+          {
+            role: "user",
+            content:
+              user +
+              `
+
+Your previous response was cut off.
+Continue from EXACTLY where it ended:
+- Finish the incomplete sentence/bullet first.
+- Do NOT repeat earlier content.
+- Keep the continuation brief.
+- End with the exact line: ---END---
+`.trim(),
+          },
+        ],
+        // small tail budget so it only finishes
+        max_output_tokens: 900,
+      });
+
+      const tail = (resp2 as any).output_text ?? "";
+
+      // If first output was empty, just return the tail
+      if (!output) output = tail;
+      else output = output.trimEnd() + "\n" + tail.trimStart();
+    }
+
+    // As a final guarantee: if somehow still missing marker, append it safely
+    if (!endsWithEndMarker(output)) {
+      output = output.trimEnd() + "\n---END---";
+    }
 
     return Response.json({ output });
   } catch (err: any) {
