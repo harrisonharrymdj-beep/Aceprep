@@ -132,6 +132,36 @@ function maxTokensForTool(tool: string) {
   return 2400;
 }
 
+function stripEndMarker(text: string) {
+  return (text ?? "").replace(/\s*---END---\s*$/, "").trimEnd();
+}
+
+function trimDanglingLine(text: string) {
+  const cleaned = stripEndMarker(text);
+  const lines = cleaned.split("\n");
+  if (lines.length === 0) return cleaned;
+
+  const last = lines[lines.length - 1].trimEnd();
+
+  // If the last line looks "cut off", drop it.
+  // Examples: "-4 ≤", "...,", ":", "(", "=", "+", "- ", etc.
+  const looksCut =
+    /(\u2264|\u2265|<|>|=|\+|\-|\*|\/|\(|\{|\[|,|:)$/.test(last) || // ends with operator/punct
+    /-\s*$/.test(last) ||                                           // ends with dash
+    /≤\s*$/.test(last) ||                                           // ends with ≤
+    /≥\s*$/.test(last);                                             // ends with ≥
+
+  if (looksCut) lines.pop();
+
+  return lines.join("\n").trimEnd();
+}
+
+function ensureEndMarker(text: string) {
+  const cleaned = trimDanglingLine(text);
+  return cleaned + "\n---END---";
+}
+
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -208,6 +238,7 @@ END_NOTES>>>
 
     // 2) Auto-repair if truncated (missing ---END--- or ends mid-thought)
     if (!output || !endsWithEndMarker(output)) {
+      const lastOutputSnippet = stripEndMarker(output).slice(-800);
       const resp2 = await client.responses.create({
         model: "gpt-5-mini",
         input: [
@@ -216,16 +247,24 @@ END_NOTES>>>
           {
             role: "user",
             content:
-              user +
-              `
+  user +
+  `
 
 Your previous response was cut off.
-Continue from EXACTLY where it ended:
-- Finish the incomplete sentence/bullet first.
-- Do NOT repeat earlier content.
-- Keep the continuation brief.
+
+Here is the last part you wrote (continue immediately after it; do not repeat it):
+<<<LAST_OUTPUT
+${lastOutputSnippet}
+LAST_OUTPUT>>>
+
+Rules for the continuation:
+- First, finish the incomplete sentence/bullet cleanly.
+- Then continue briefly (do not reprint earlier sections).
+- If you are unsure what comes next, stop after finishing the incomplete line.
 - End with the exact line: ---END---
 `.trim(),
+
+
           },
         ],
         // small tail budget so it only finishes
@@ -234,15 +273,18 @@ Continue from EXACTLY where it ended:
 
       const tail = (resp2 as any).output_text ?? "";
 
-      // If first output was empty, just return the tail
-      if (!output) output = tail;
-      else output = output.trimEnd() + "\n" + tail.trimStart();
+const base = trimDanglingLine(output);
+const add = trimDanglingLine(tail);
+
+// If first output was empty, just return the tail
+if (!base) output = add;
+else output = base + "\n" + add;
+
     }
 
     // As a final guarantee: if somehow still missing marker, append it safely
-    if (!endsWithEndMarker(output)) {
-      output = output.trimEnd() + "\n---END---";
-    }
+    output = ensureEndMarker(output);
+
 
     return Response.json({ output });
   } catch (err: any) {
