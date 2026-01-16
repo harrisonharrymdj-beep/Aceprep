@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import * as pdfjsLib from "pdfjs-dist";
 
 const adDurationMs = 15000; // 15s ad
 const DAILY_FREE_LIMIT = 5;
@@ -116,26 +115,35 @@ export default function Home() {
     }
   }
 
-  async function handlePdfUpload(file: File) {
-    setError(null);
-    try {
-      const buffer = await file.arrayBuffer();
-      const pdf = await (pdfjsLib as any).getDocument({ data: buffer }).promise;
+async function handlePdfUpload(file: File) {
+  setError(null);
+  try {
+    // Dynamically import PDF.js only in the browser (avoids DOMMatrix SSR crash)
+    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
-      let text = "";
-      const maxPages = Math.min(pdf.numPages, 10);
+    // Worker setup (required for many setups)
+    // Uses CDN worker that matches the installed pdfjs version
+    (pdfjsLib as any).GlobalWorkerOptions.workerSrc =
+      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${(pdfjsLib as any).version}/pdf.worker.min.js`;
 
-      for (let i = 1; i <= maxPages; i++) {
-        const page = await pdf.getPage(i);
-        const content = await page.getTextContent();
-        text += content.items.map((it: any) => it.str).join(" ") + "\n";
-      }
+    const buffer = await file.arrayBuffer();
+    const pdf = await (pdfjsLib as any).getDocument({ data: buffer }).promise;
 
-      setNotes((prev) => (prev ? prev + "\n\n" : "") + text.slice(0, 30000));
-    } catch {
-      setError("Could not read PDF. Make sure it has selectable text (not scanned).");
+    let text = "";
+    const maxPages = Math.min(pdf.numPages, 10);
+
+    for (let i = 1; i <= maxPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      text += (content.items as any[]).map((it) => it.str).join(" ") + "\n";
     }
+
+    setNotes((prev) => (prev ? prev + "\n\n" : "") + text.slice(0, 30000));
+  } catch (e) {
+    setError("Could not read PDF. Make sure it has selectable text (not scanned).");
   }
+}
+
 
   return (
     <div className="min-h-screen bg-zinc-100 text-black">
