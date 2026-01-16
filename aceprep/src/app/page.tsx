@@ -115,19 +115,21 @@ export default function Home() {
     }
   }
 
+  
 async function handlePdfUpload(file: File) {
   setError(null);
   try {
-    // Dynamically import PDF.js only in the browser (avoids DOMMatrix SSR crash)
     const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
-    // Worker setup (required for many setups)
-    // Uses CDN worker that matches the installed pdfjs version
-    (pdfjsLib as any).GlobalWorkerOptions.workerSrc =
-      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${(pdfjsLib as any).version}/pdf.worker.min.js`;
+    // ✅ PDF.js requires workerSrc to be defined even if worker is disabled
+    (pdfjsLib as any).GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+
 
     const buffer = await file.arrayBuffer();
-    const pdf = await (pdfjsLib as any).getDocument({ data: buffer }).promise;
+
+    const pdf = await (pdfjsLib as any).getDocument({
+      data: buffer,
+    }).promise;
 
     let text = "";
     const maxPages = Math.min(pdf.numPages, 10);
@@ -140,10 +142,14 @@ async function handlePdfUpload(file: File) {
 
     setNotes((prev) => (prev ? prev + "\n\n" : "") + text.slice(0, 30000));
   } catch (e: any) {
-  console.error(e);
-  setError(`PDF read failed: ${e?.message ?? String(e)}`);
+    console.error(e);
+    setError(`PDF read failed: ${e?.message ?? String(e)}`);
   }
 }
+
+
+
+
 
 
   return (
@@ -193,7 +199,11 @@ async function handlePdfUpload(file: File) {
           <input
             type="file"
             accept="application/pdf"
-            onChange={(e) => e.target.files && handlePdfUpload(e.target.files[0])}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) handlePdfUpload(f);
+              e.currentTarget.value = "";
+            }}
             className="mt-2 text-sm"
           />
         </div>
