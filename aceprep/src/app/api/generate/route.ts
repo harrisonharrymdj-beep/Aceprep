@@ -18,18 +18,26 @@ function getClient() {
 function toolInstructions(tool: string) {
   switch (tool) {
     case "Homework Explain":
-      return `
+  return `
 Special behavior for Homework Explain:
-- Explain what each problem is asking and how to approach it.
-- Use ONLY these sections:
+- FIRST: Identify ALL problem numbers and subparts present in the study material.
+- You MUST cover EVERY identified problem and subpart.
+- For EACH problem/subpart, include ALL THREE sections:
   1. What the problem is asking
   2. Method / steps to solve
   3. Common pitfalls
-- Keep each section concise.
-- Do NOT include practice questions.
-- If multiple problems are present, summarize each briefly.
+
+Rules:
+- Do NOT skip problems.
+- Do NOT stop early.
+- Do NOT summarize the entire assignment as one problem.
+- The response is INVALID if any problem is missing.
+- Keep explanations high-level (no final numeric answers).
 - NEVER end mid-sentence or mid-bullet.
+- End ONLY after the LAST problem is completed, then print:
+---END---
 `.trim();
+
 
     case "Formula Sheet":
       return `
@@ -125,7 +133,7 @@ function endsWithEndMarker(text: string) {
 // Small helper so we can tune output by tool
 function maxTokensForTool(tool: string) {
   // Homework Explain often spans many problems; give it a bit more room
-  if (tool === "Homework Explain") return 2800;
+  if (tool === "Homework Explain") return 3600;
   if (tool === "Study Guide") return 2600;
   // formula sheet is compact; keep smaller
   if (tool === "Formula Sheet") return 2200;
@@ -159,6 +167,88 @@ function trimDanglingLine(text: string) {
 function ensureEndMarker(text: string) {
   const cleaned = trimDanglingLine(text);
   return cleaned + "\n---END---";
+}
+function globalPlanningBlock(tool: string) {
+  return `
+PLANNING (internal only — do not output):
+- First, scan the study material and identify what MUST be produced for the selected tool (“${tool}”).
+- Build an internal checklist of required sections and required coverage.
+- Do not start writing until the checklist is complete.
+- While writing, continually verify items are covered.
+- If output space is tight, compress wording but do not violate required structure.
+`.trim();
+}
+
+function globalFinishCleanlyRules() {
+  return `
+FINISH CLEANLY:
+- NEVER end mid-sentence, mid-number, mid-bullet, or with dangling punctuation.
+- If you are running out of space, finish the current bullet cleanly, then stop.
+- Always include the final line exactly: ---END---
+`.trim();
+}
+
+/**
+ * Tool-specific “must satisfy” rules.
+ * Keep these strict but appropriate to each tool.
+ */
+function toolCompletionRules(tool: string) {
+  switch (tool) {
+    case "Homework Explain":
+      return `
+COMPLETENESS (Homework Explain):
+- Identify ALL problem numbers and subparts present in the study material.
+- You MUST cover EVERY identified problem/subpart.
+- For EACH problem/subpart include ALL THREE sections:
+  1) What the problem is asking
+  2) Method / steps to solve
+  3) Common pitfalls
+- If long, shorten each section, but do not skip any problem/subpart.
+- No final submit-ready answers.
+`.trim();
+
+    case "Formula Sheet":
+      return `
+COMPLETENESS (Formula Sheet):
+- Produce a Formula Sheet with 4–10 labeled sections (based on topics found).
+- Include formulas/identities/definitions + variable meanings + when to use (1 short line).
+- Do NOT include step-by-step strategies or practice questions.
+- If material is thin, still output a complete formula sheet structure and note missing items briefly.
+`.trim();
+
+    case "Study Guide":
+      return `
+COMPLETENESS (Study Guide):
+- You MUST include all 5 required sections:
+  1) Key formulas (with brief explanations)
+  2) Core concepts (plain English)
+  3) Step-by-step reasoning strategies
+  4) Common mistakes or misconceptions
+  5) 3–5 exam-style practice questions (NO solutions)
+- If space is tight, shorten sections 1–4, but still include all 5 sections.
+`.trim();
+
+    case "Essay Outline":
+      return `
+COMPLETENESS (Essay Outline):
+- Provide 2–3 thesis options.
+- Provide a structured outline (I, A, 1…).
+- Provide bullet evidence ideas per section.
+- Optional: counterargument + rebuttal.
+- Do NOT write the full essay unless asked.
+`.trim();
+
+    case "Exam Pack":
+      return `
+COMPLETENESS (Exam Pack):
+- Generate 8–12 exam-style questions.
+- Mix easy / medium / hard.
+- Provide an answer key at the end.
+`.trim();
+
+    default:
+      return "";
+  }
 }
 
 
@@ -194,21 +284,22 @@ SECURITY RULES (follow strictly):
 `.trim();
 
     const developer = `
+${globalPlanningBlock(tool)}
+
 General rules:
 - Follow the section structure defined by the selected tool.
-- If space is limited, shorten or omit later sections.
-- NEVER end mid-sentence or mid-bullet.
-- If nearing output limits, end the current section cleanly and print "---END---".
+- Prefer correctness over completeness, but do not violate required structure.
+- If space is limited, compress explanations rather than skipping required sections.
 
-Style:
-- Bullet points
-- Concise
-- Prefer correctness over completeness
+${toolCompletionRules(tool)}
 
 ${toolDeveloperSpec(tool)}
 
 ${toolInstructions(tool)}
+
+${globalFinishCleanlyRules()}
 `.trim();
+
 
     const user = `
 Tool: ${tool}
@@ -257,12 +348,13 @@ Here is the last part you wrote (continue immediately after it; do not repeat it
 ${lastOutputSnippet}
 LAST_OUTPUT>>>
 
-Rules for the continuation:
+Continuation rules:
 - First, finish the incomplete sentence/bullet cleanly.
-- Then continue briefly (do not reprint earlier sections).
-- If you are unsure what comes next, stop after finishing the incomplete line.
+- Then continue, prioritizing REQUIRED structure and completeness for the selected tool.
+- Compress aggressively if needed (short bullets), but do not violate the tool’s required sections.
 - End with the exact line: ---END---
 `.trim(),
+
 
 
           },
