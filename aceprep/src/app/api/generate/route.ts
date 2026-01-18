@@ -83,18 +83,21 @@ OUTPUT FORMAT (Formula Sheet):
 `.trim();
 
     case "Homework Explain":
-      return `
+  return `
 OUTPUT FORMAT (Homework Explain):
-- Title: "Homework Explain"
-- Organize by problem numbers/subparts found in the material
-- For each problem:
-  - What the problem is asking (1 line)
-  - Method / steps to solve
-  - Common pitfalls
-- Keep it short. Prefer summaries over long explanations.
-- Do NOT provide a final submit-ready answer for graded assignments.
-- If the user provides their attempt, you may correct it and show a worked solution.
+- First line MUST be: Homework Explain
+- Then repeat blocks like this for EACH problem/subpart found:
+
+[ProblemLabel]
+- What the problem is asking: ...
+- Method / steps to solve:
+  - ...
+- Common pitfalls:
+  - ...
+
+- Do NOT include any planning/checklist/meta lines.
 `.trim();
+
 
     case "Essay Outline":
       return `
@@ -195,17 +198,22 @@ FINISH CLEANLY:
 function toolCompletionRules(tool: string) {
   switch (tool) {
     case "Homework Explain":
-      return `
-COMPLETENESS (Homework Explain):
-- Identify ALL problem numbers and subparts present in the study material.
-- You MUST cover EVERY identified problem/subpart.
-- For EACH problem/subpart include ALL THREE sections:
-  1) What the problem is asking
-  2) Method / steps to solve
-  3) Common pitfalls
-- If long, shorten each section, but do not skip any problem/subpart.
+  return `
+Special behavior for Homework Explain:
+- You MUST cover every problem/subpart present in the material.
+- Output MUST be organized by problem/subpart labels found (e.g., "1(a)", "3(b)").
+- For EACH problem/subpart include EXACTLY:
+  - What the problem is asking
+  - Method / steps to solve
+  - Common pitfalls
+Rules:
 - No final submit-ready answers.
+- Keep bullets short.
+- Do NOT include any planning notes.
+- Do NOT output any internal checklists.
+- End with ---END--- only after finishing the last problem/subpart.
 `.trim();
+
 
     case "Formula Sheet":
       return `
@@ -250,6 +258,22 @@ COMPLETENESS (Exam Pack):
       return "";
   }
 }
+
+function looksLikePlanningLeak(text: string) {
+  const t = (text ?? "").toLowerCase();
+  const tooShort = t.trim().length < 200; // tune if you want
+  const planningPhrases =
+    t.includes("planning") ||
+    t.includes("internal") ||
+    t.includes("checklist") ||
+    t.includes("identified") ||
+    t.startsWith("first:") ||
+    t.startsWith("first ") ||
+    t.includes("before writing");
+
+  return tooShort || planningPhrases;
+}
+
 
 
 export async function POST(req: Request) {
@@ -325,7 +349,34 @@ END_NOTES>>>
       max_output_tokens: maxTokensForTool(tool),
     });
 
-    let output = (resp1 as any).output_text ?? "";
+let output = (resp1 as any).output_text ?? "";
+
+// ✅ PART 3: HARD RETRY if planning leaked / output is invalid
+if (looksLikePlanningLeak(output)) {
+  const respFix = await client.responses.create({
+    model: "gpt-5-mini",
+    input: [
+      { role: "system", content: system },
+      {
+        role: "developer",
+        content:
+`${developer}
+
+CRITICAL FAILURE:
+- Your previous response was INVALID.
+- It contained planning/meta text or was incomplete.
+- You MUST output ONLY the final user-facing content.
+- Do NOT mention planning, identification, or checklists.
+- Begin immediately with the correct title/structure.
+- End with the exact line: ---END---`,
+      },
+      { role: "user", content: user },
+    ],
+    max_output_tokens: maxTokensForTool(tool),
+  });
+
+  output = (respFix as any).output_text ?? output;
+}
 
     // 2) Auto-repair if truncated (missing ---END--- or ends mid-thought)
     if (!output || !endsWithEndMarker(output)) {
