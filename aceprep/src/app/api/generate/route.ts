@@ -1,6 +1,8 @@
 // src/app/api/aceprep/route.ts
 import OpenAI from "openai";
 import * as pdfParseNS from "pdf-parse";
+import { Buffer } from "node:buffer";
+
 
 async function extractPdfText(buffer: Buffer) {
   const pdfParse: any = (pdfParseNS as any).default ?? pdfParseNS;
@@ -29,8 +31,8 @@ function getClient() {
  * - Use nano for cheap + fast once you pre-split the PDF.
  */
 function modelForTool(tool: string) {
-  // You can customize by tool if you want
-  return "gpt-5-nano"; // <- switch here (or "gpt-5-mini")
+  if (tool === "Homework Explain") return "gpt-5-mini"; // reliability
+  return "gpt-5-nano"; // cheap for everything else
 }
 
 /**
@@ -54,7 +56,7 @@ function splitIntoProblems(text: string) {
     /\n(?=(?:Problem\s*)?\d+\s*(?:[\.\)]|\([a-z]\)|\([a-z]\)\([ivx]+\)|\([ivx]+\)))/i
   );
 
-  const units = parts.map((p) => p.trim()).filter((p) => p.length > 120);
+const units = parts.map((p) => p.trim()).filter((p) => p.length > 40);
 
   // Fallback if split fails (single big blob)
   if (units.length <= 1) {
@@ -106,6 +108,7 @@ Rules:
 TASK: Homework Explain
 
 Instructions:
+- First line MUST be: [Problem]
 - You will be given ONE problem chunk at a time.
 - Output exactly these sections:
   • What the problem is asking
@@ -120,7 +123,7 @@ Instructions:
 Exam type: ${examType}
 Professor emphasis: ${profEmphasis}
 
-PROBLEM TEXT:
+PROBLEM TEXT (may include the label like 1(a), 2(b), etc):
 <<<BEGIN
 ${notes}
 END>>>
@@ -221,8 +224,10 @@ async function readRequest(req: Request) {
       }
     }
 
-    const pdfFile = fd.get("pdf");
-    return { tool, notes, options, pdfFile };
+const pdfRaw = fd.get("pdf");
+const pdfFile = pdfRaw instanceof File ? pdfRaw : null;
+return { tool, notes, options, pdfFile };
+
   }
 
   // default JSON
@@ -246,23 +251,36 @@ export async function POST(req: Request) {
     const client = getClient();
     const model = modelForTool(tool);
 
-    // 1) If PDF uploaded, extract text server-side
-    let materialText = notes;
+  // 1) If PDF uploaded, extract text server-side
+let materialText = notes;
 
-    if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
-      const ab = await (pdfFile as File).arrayBuffer();
-      const buffer = Buffer.from(ab);
-      const extracted = await extractPdfText(buffer);
+if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
+  const ab = await (pdfFile as File).arrayBuffer();
+  const buffer = Buffer.from(ab);
+  const extracted = await extractPdfText(buffer);
 
-      if (extracted) materialText = extracted;
-    }
+  if (extracted) materialText = extracted;
 
-    if (!materialText) {
-      return Response.json(
-        { error: "Paste notes or upload a PDF first." },
-        { status: 400 }
-      );
-    }
+  // ✅ guard: pdf extracted too little text
+  if (!materialText || materialText.replace(/\s/g, "").length < 200) {
+    return Response.json(
+      {
+        error:
+          "I couldn't extract enough readable text from that PDF. Try another PDF or paste the text content.",
+      },
+      { status: 400 }
+    );
+  }
+}
+
+// ✅ also guard for non-pdf requests
+if (!materialText) {
+  return Response.json(
+    { error: "Paste notes or upload a PDF first." },
+    { status: 400 }
+  );
+}
+
 
     // 2) If Homework Explain, split into problems and process per-problem
     if (tool === "Homework Explain") {
