@@ -163,17 +163,6 @@ function ensureEndMarker(text: string) {
   return cleaned + "\n---END---";
 }
 
-function globalPlanningBlock(tool: string) {
-  return `
-PLANNING (internal only — do not output):
-- First, scan the study material and identify what MUST be produced for the selected tool (“${tool}”).
-- Build an internal checklist of required sections and required coverage.
-- Do not start writing until the checklist is complete.
-- While writing, continually verify items are covered.
-- If output space is tight, compress wording but do not violate required structure.
-`.trim();
-}
-
 function globalFinishCleanlyRules() {
   return `
 FINISH CLEANLY:
@@ -275,7 +264,7 @@ function endedCleanly(text: string) {
   const last = lines[lines.length - 1].trimEnd();
 
   // “Good” endings: sentence punctuation or a closed bracket/paren, etc.
-  const goodEnd = /[.!?)]$/.test(last);
+const goodEnd = /[.!?)}\]"']$/.test(last);
 
   // “Bad” endings: common truncation patterns
   const badEnd =
@@ -296,23 +285,21 @@ function endedCleanly(text: string) {
 function removeFragmentBullet(text: string) {
   const cleaned = stripEndMarker(text);
   const lines = cleaned.split("\n");
-
   if (lines.length === 0) return cleaned;
 
-  
+  let last = lines[lines.length - 1].trim();
 
-  const last = lines[lines.length - 1].trim();
-if (/^\[[^\]]+\]$/.test(last) || /:\s*$/.test(last)) {
-  lines.pop();
-}
-
-  // If last line is a bullet but does NOT end in punctuation, drop it
-  if (
-    last.startsWith("-") &&
-    !/[.!?)]$/.test(last)
-  ) {
+  // Drop dangling headers like "[1(b)]" or "Method / steps to solve:"
+  if (/^\[[^\]]+\]$/.test(last) || /:\s*$/.test(last)) {
     lines.pop();
+    if (lines.length === 0) return "";
+    last = lines[lines.length - 1].trim();
   }
+
+  // Drop trailing bullet fragment with no punctuation
+  const endsOk = /[.!?)}\]"']$/.test(last);
+if (last.startsWith("-") && !endsOk) lines.pop()
+    lines.pop();
 
   return lines.join("\n").trimEnd();
 }
@@ -352,8 +339,6 @@ SECURITY RULES (follow strictly):
 `.trim();
 
     const developer = `
-${globalPlanningBlock(tool)}
-
 General rules:
 - Follow the section structure defined by the selected tool.
 - Prefer correctness over completeness, but do not violate required structure.
@@ -401,16 +386,17 @@ if (looksLikePlanningLeak(output)) {
     model: "gpt-5-mini",
     input: [
       { role: "system", content: system },
-      {
+      
+  {
   role: "developer",
-  content: `
-Your previous response was INVALID.
+  content: `${developer}
 
+CRITICAL:
+Your previous response was INVALID.
 Output ONLY the final user-facing answer in the correct format for tool "${tool}".
 - No planning/checklists/meta.
 - Every bullet must end with punctuation.
-- End with the exact line: ---END---
-`.trim(),
+- End with the exact line: ---END---`
 },
 
       { role: "user", content: user },
@@ -424,7 +410,8 @@ Output ONLY the final user-facing answer in the correct format for tool "${tool}
     // 2) Auto-repair if truncated (missing ---END--- or ends mid-thought)
 if (!output || !endsWithEndMarker(output) || !endedCleanly(output)) {
   // resp2
-      const lastOutputSnippet = stripEndMarker(output).slice(-800);
+      const cleaned = stripEndMarker(output);
+      const tailLines = cleaned.split("\n").slice(-40).join("\n");
       const resp2 = await client.responses.create({
         model: "gpt-5-mini",
         input: [
@@ -440,7 +427,7 @@ Your previous response was cut off.
 
 Here is the last part you wrote (continue immediately after it; do not repeat it):
 <<<LAST_OUTPUT
-${lastOutputSnippet}
+${tailLines}
 LAST_OUTPUT>>>
 
 Continuation rules:
