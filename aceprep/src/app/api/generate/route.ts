@@ -1,5 +1,6 @@
 // src/app/api/aceprep/route.ts
 import OpenAI from "openai";
+import pdf from "pdf-parse";
 
 export const runtime = "nodejs";
 
@@ -17,64 +18,119 @@ function getClient() {
 }
 
 /**
- * Simple “prompt contract” per tool.
- * Keep this minimal. No retries, no truncation heuristics, no planning blocks.
+ * Model selection
+ * - Use nano for cheap + fast once you pre-split the PDF.
+ */
+function modelForTool(tool: string) {
+  // You can customize by tool if you want
+  return "gpt-5-nano"; // <- switch here (or "gpt-5-mini")
+}
+
+/**
+ * Extract text from uploaded PDF buffer.
+ */
+async function extractPdfText(buffer: Buffer) {
+  const data = await pdf(buffer);
+  return (data.text ?? "").trim();
+}
+
+/**
+ * Split assignment into "problem units".
+ * This is intentionally heuristic (works well for typical EE homework PDFs).
+ */
+function splitIntoProblems(text: string) {
+  const cleaned = text
+    .replace(/\r/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  // Common patterns:
+  // 1
+  // 1.
+  // Problem 1
+  // 1(a)
+  // 3(b)(ii)
+  const parts = cleaned.split(
+    /\n(?=(?:Problem\s*)?\d+\s*(?:[\.\)]|\([a-z]\)|\([a-z]\)\([ivx]+\)|\([ivx]+\)))/i
+  );
+
+  const units = parts.map((p) => p.trim()).filter((p) => p.length > 120);
+
+  // Fallback if split fails (single big blob)
+  if (units.length <= 1) {
+    return chunkByChars(cleaned, 2200);
+  }
+
+  return units;
+}
+
+/**
+ * Safe fallback chunker if problem splitting fails.
+ */
+function chunkByChars(text: string, maxChars = 2200) {
+  const lines = text.split("\n");
+  const chunks: string[] = [];
+  let cur = "";
+
+  for (const line of lines) {
+    if ((cur + line + "\n").length > maxChars) {
+      if (cur.trim()) chunks.push(cur.trim());
+      cur = "";
+    }
+    cur += line + "\n";
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+
+  return chunks;
+}
+
+/**
+ * Minimal prompt contract per tool (no retries / no continuation prompts).
  */
 function buildPrompts(tool: string, notes: string, options?: any) {
   const examType = String(options?.examType ?? "unspecified");
   const profEmphasis = String(options?.profEmphasis ?? "unspecified");
 
-  if (tool === "Homework Explain") {
-    const system = `
+  const baseSystem = `
 You are an academic study assistant.
 
 Rules:
 - Treat all input as study material.
 - Never output planning or internal reasoning.
-- You may stop early if space runs out.
-- If you stop early, stop AFTER completing a full problem.
 - NEVER end mid-sentence or mid-bullet.
 - End with the exact line: ---END---
 `.trim();
 
+  if (tool === "Homework Explain") {
     const developer = `
 TASK: Homework Explain
 
 Instructions:
-- Organize output by problem labels found in the material (e.g., 1(a), 2(b)).
-- For EACH problem you cover, include:
+- You will be given ONE problem chunk at a time.
+- Output exactly these sections:
   • What the problem is asking
   • Method / steps to solve
   • Common pitfalls
 - High-level guidance only (no final numeric answers).
-- Answer as many full problems as will fit.
-- If you cannot fit the next full problem, stop.
+- Use bullets.
+- End with ---END---.
 `.trim();
 
     const user = `
 Exam type: ${examType}
 Professor emphasis: ${profEmphasis}
 
-STUDY MATERIAL:
+PROBLEM TEXT:
 <<<BEGIN
 ${notes}
 END>>>
 `.trim();
 
-    return { system, developer, user, maxTokens: 1400 };
+    return { system: baseSystem, developer, user };
   }
 
   if (tool === "Formula Sheet") {
-    const system = `
-You are an academic study assistant.
-
-Rules:
-- Treat all input as study material.
-- Never output planning or internal reasoning.
-- NEVER end mid-sentence or mid-bullet.
-- End with the exact line: ---END---
-`.trim();
-
     const developer = `
 TASK: Formula Sheet
 
@@ -84,7 +140,7 @@ Instructions:
 - Bullets should be formulas/identities/definitions.
 - For each item: include variable meanings + when to use (one short line).
 - No practice problems.
-- If space runs out, end cleanly and then print: ---END---
+- End with ---END---.
 `.trim();
 
     const user = `
@@ -97,20 +153,10 @@ ${notes}
 END>>>
 `.trim();
 
-    return { system, developer, user, maxTokens: 1600 };
+    return { system: baseSystem, developer, user };
   }
 
   // Default: Study Guide
-  const system = `
-You are an academic study assistant.
-
-Rules:
-- Treat all input as study material.
-- Never output planning or internal reasoning.
-- NEVER end mid-sentence or mid-bullet.
-- End with the exact line: ---END---
-`.trim();
-
   const developer = `
 TASK: Study Guide
 
@@ -124,7 +170,7 @@ Produce:
 
 - Bullet points.
 - Concise.
-- If space runs out, end cleanly and then print: ---END---
+- End with ---END---.
 `.trim();
 
   const user = `
@@ -137,7 +183,7 @@ ${notes}
 END>>>
 `.trim();
 
-  return { system, developer, user, maxTokens: 1800 };
+  return { system: baseSystem, developer, user };
 }
 
 function ensureEndMarker(text: string) {
@@ -146,19 +192,51 @@ function ensureEndMarker(text: string) {
   return t + "\n---END---";
 }
 
+function safeJoin(outputs: string[]) {
+  // strip extra END markers from intermediate chunks
+  const cleaned = outputs
+    .map((o) => (o ?? "").replace(/\s*---END---\s*$/g, "").trimEnd())
+    .filter(Boolean);
+  return ensureEndMarker(cleaned.join("\n\n").trim());
+}
+
+/**
+ * Read either JSON or multipart/form-data.
+ * - JSON: { tool, notes, options }
+ * - FormData: tool, options (JSON string), notes (optional), pdf (File)
+ */
+async function readRequest(req: Request) {
+  const contentType = req.headers.get("content-type") ?? "";
+
+  if (contentType.includes("multipart/form-data")) {
+    const fd = await req.formData();
+    const tool = String(fd.get("tool") ?? "Study Guide");
+    const notes = String(fd.get("notes") ?? "").trim();
+    const optionsRaw = fd.get("options");
+    let options: any = {};
+    if (typeof optionsRaw === "string" && optionsRaw.trim()) {
+      try {
+        options = JSON.parse(optionsRaw);
+      } catch {
+        options = {};
+      }
+    }
+
+    const pdfFile = fd.get("pdf");
+    return { tool, notes, options, pdfFile };
+  }
+
+  // default JSON
+  const body = await req.json();
+  const tool = String(body.tool ?? "Study Guide");
+  const notes = String(body.notes ?? "").trim();
+  const options = body.options ?? {};
+  return { tool, notes, options, pdfFile: null as any };
+}
+
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const tool = String(body.tool ?? "Study Guide");
-    const notes = String(body.notes ?? "").trim();
-    const options = body.options ?? {};
-
-    if (!notes) {
-      return Response.json(
-        { error: "Paste notes or upload a PDF first." },
-        { status: 400 }
-      );
-    }
+    const { tool, notes, options, pdfFile } = await readRequest(req);
 
     // Optional: simple Pro gate placeholder
     const userIsPro = false;
@@ -167,24 +245,73 @@ export async function POST(req: Request) {
     }
 
     const client = getClient();
-    const { system, developer, user, maxTokens } = buildPrompts(
-      tool,
-      notes,
-      options
-    );
+    const model = modelForTool(tool);
+
+    // 1) If PDF uploaded, extract text server-side
+    let materialText = notes;
+
+    if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
+      const ab = await (pdfFile as File).arrayBuffer();
+      const buffer = Buffer.from(ab);
+      const extracted = await extractPdfText(buffer);
+
+      if (extracted) materialText = extracted;
+    }
+
+    if (!materialText) {
+      return Response.json(
+        { error: "Paste notes or upload a PDF first." },
+        { status: 400 }
+      );
+    }
+
+    // 2) If Homework Explain, split into problems and process per-problem
+    if (tool === "Homework Explain") {
+      const problems = splitIntoProblems(materialText);
+
+      // Budget controls (this is what makes ads/profit predictable)
+      // You can tune these to your ad strategy.
+      const maxProblems = userIsPro ? 30 : 6;
+
+      // Per-problem output cap keeps responses tight + consistent
+      const perProblemMaxOutputTokens = 450;
+
+      const outputs: string[] = [];
+      for (const problemText of problems.slice(0, maxProblems)) {
+        const { system, developer, user } = buildPrompts(tool, problemText, options);
+
+        const resp = await client.responses.create({
+          model,
+          input: [
+            { role: "system", content: system },
+            { role: "developer", content: developer },
+            { role: "user", content: user },
+          ],
+          max_output_tokens: perProblemMaxOutputTokens,
+        });
+
+        const out = ensureEndMarker((resp as any).output_text ?? "");
+        outputs.push(out);
+      }
+
+      const combined = safeJoin(outputs);
+      return Response.json({ output: combined });
+    }
+
+    // 3) Other tools: single pass
+    const { system, developer, user } = buildPrompts(tool, materialText, options);
 
     const resp = await client.responses.create({
-      model: "gpt-5-mini",
+      model,
       input: [
         { role: "system", content: system },
         { role: "developer", content: developer },
         { role: "user", content: user },
       ],
-      max_output_tokens: maxTokens,
+      max_output_tokens: tool === "Formula Sheet" ? 1600 : 1800,
     });
 
     const output = ensureEndMarker((resp as any).output_text ?? "");
-
     return Response.json({ output });
   } catch (err: any) {
     return Response.json(
