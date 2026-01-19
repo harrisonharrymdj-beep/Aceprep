@@ -1,6 +1,13 @@
 // src/app/api/aceprep/route.ts
 import OpenAI from "openai";
-import pdf from "pdf-parse";
+import * as pdfParseNS from "pdf-parse";
+
+async function extractPdfText(buffer: Buffer) {
+  const pdfParse: any = (pdfParseNS as any).default ?? pdfParseNS;
+  const data = await pdfParse(buffer);
+  return (data?.text ?? "").trim();
+}
+
 
 export const runtime = "nodejs";
 
@@ -24,14 +31,6 @@ function getClient() {
 function modelForTool(tool: string) {
   // You can customize by tool if you want
   return "gpt-5-nano"; // <- switch here (or "gpt-5-mini")
-}
-
-/**
- * Extract text from uploaded PDF buffer.
- */
-async function extractPdfText(buffer: Buffer) {
-  const data = await pdf(buffer);
-  return (data.text ?? "").trim();
 }
 
 /**
