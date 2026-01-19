@@ -19,24 +19,11 @@ function toolInstructions(tool: string) {
   switch (tool) {
     case "Homework Explain":
   return `
-Special behavior for Homework Explain:
-- FIRST: Identify ALL problem numbers and subparts present in the study material.
-- You MUST cover EVERY identified problem and subpart.
-- For EACH problem/subpart, include ALL THREE sections:
-  1. What the problem is asking
-  2. Method / steps to solve
-  3. Common pitfalls
-
-Rules:
-- Do NOT skip problems.
-- Do NOT stop early.
-- Do NOT summarize the entire assignment as one problem.
-- The response is INVALID if any problem is missing.
-- Keep explanations high-level (no final numeric answers).
-- NEVER end mid-sentence or mid-bullet.
-- End ONLY after the LAST problem is completed, then print:
----END---
+Behavior (Homework Explain):
+- Explain what each problem is asking and how to approach it.
+- High-level guidance only (no final submit-ready answers).
 `.trim();
+
 
 
     case "Formula Sheet":
@@ -170,9 +157,12 @@ function trimDanglingLine(text: string) {
 }
 
 function ensureEndMarker(text: string) {
-  const cleaned = trimDanglingLine(text);
+  const cleaned = removeFragmentBullet(
+    trimDanglingLine(text)
+  );
   return cleaned + "\n---END---";
 }
+
 function globalPlanningBlock(tool: string) {
   return `
 PLANNING (internal only — do not output):
@@ -303,6 +293,31 @@ function endedCleanly(text: string) {
   return true;
 }
 
+function removeFragmentBullet(text: string) {
+  const cleaned = stripEndMarker(text);
+  const lines = cleaned.split("\n");
+
+  if (lines.length === 0) return cleaned;
+
+  
+
+  const last = lines[lines.length - 1].trim();
+if (/^\[[^\]]+\]$/.test(last) || /:\s*$/.test(last)) {
+  lines.pop();
+}
+
+  // If last line is a bullet but does NOT end in punctuation, drop it
+  if (
+    last.startsWith("-") &&
+    !/[.!?)]$/.test(last)
+  ) {
+    lines.pop();
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+
 
 
 export async function POST(req: Request) {
@@ -387,18 +402,17 @@ if (looksLikePlanningLeak(output)) {
     input: [
       { role: "system", content: system },
       {
-        role: "developer",
-        content:
-`${developer}
+  role: "developer",
+  content: `
+Your previous response was INVALID.
 
-CRITICAL FAILURE:
-- Your previous response was INVALID.
-- It contained planning/meta text or was incomplete.
-- You MUST output ONLY the final user-facing content.
-- Do NOT mention planning, identification, or checklists.
-- Begin immediately with the correct title/structure.
-- End with the exact line: ---END---`,
-      },
+Output ONLY the final user-facing answer in the correct format for tool "${tool}".
+- No planning/checklists/meta.
+- Every bullet must end with punctuation.
+- End with the exact line: ---END---
+`.trim(),
+},
+
       { role: "user", content: user },
     ],
     max_output_tokens: maxTokensForTool(tool),
