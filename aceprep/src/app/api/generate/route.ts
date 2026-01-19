@@ -160,7 +160,9 @@ function trimDanglingLine(text: string) {
     /(\u2264|\u2265|<|>|=|\+|\-|\*|\/|\(|\{|\[|,|:)$/.test(last) || // ends with operator/punct
     /-\s*$/.test(last) ||                                           // ends with dash
     /≤\s*$/.test(last) ||                                           // ends with ≤
-    /≥\s*$/.test(last);                                             // ends with ≥
+    /≥\s*$/.test(last) ||
+    /\b(imag|real|cos|sin|tan|theta|phase)\b$/i.test(last);
+  // ends with ≥
 
   if (looksCut) lines.pop();
 
@@ -274,6 +276,33 @@ function looksLikePlanningLeak(text: string) {
   return tooShort || planningPhrases;
 }
 
+// Detect if the last line looks like it got cut mid-thought
+function endedCleanly(text: string) {
+  const cleaned = stripEndMarker(text);
+  const lines = cleaned.split("\n").filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return false;
+
+  const last = lines[lines.length - 1].trimEnd();
+
+  // “Good” endings: sentence punctuation or a closed bracket/paren, etc.
+  const goodEnd = /[.!?)]$/.test(last);
+
+  // “Bad” endings: common truncation patterns
+  const badEnd =
+    /(\u2264|\u2265|<|>|=|\+|\-|\*|\/|\(|\{|\[|,|:)$/.test(last) || // ends with operator/punct
+    /\b(imag|real|cos|sin|tan|theta|phase)\b$/i.test(last) ||       // ends on a half phrase like "imag"
+    /-\s*$/.test(last);
+
+  // If it doesn't end “good” and it smells “bad”, treat as not clean
+  if (!goodEnd && badEnd) return false;
+
+  // If it doesn't end good punctuation at all, still consider it suspicious
+  // (this catches plain cutoffs like "... imag")
+  if (!goodEnd) return false;
+
+  return true;
+}
+
 
 
 export async function POST(req: Request) {
@@ -379,7 +408,8 @@ CRITICAL FAILURE:
 }
 
     // 2) Auto-repair if truncated (missing ---END--- or ends mid-thought)
-    if (!output || !endsWithEndMarker(output)) {
+if (!output || !endsWithEndMarker(output) || !endedCleanly(output)) {
+  // resp2
       const lastOutputSnippet = stripEndMarker(output).slice(-800);
       const resp2 = await client.responses.create({
         model: "gpt-5-mini",
