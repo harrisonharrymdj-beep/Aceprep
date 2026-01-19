@@ -259,28 +259,23 @@ function looksLikePlanningLeak(text: string) {
 function endedCleanly(text: string) {
   const cleaned = stripEndMarker(text);
   const lines = cleaned.split("\n").filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return false;
+  const tail = lines.slice(-6);
 
-  const last = lines[lines.length - 1].trimEnd();
+  const goodEnd = /[.!?)}\]"']$/.test(tail[tail.length - 1].trimEnd());
 
-  // “Good” endings: sentence punctuation or a closed bracket/paren, etc.
-const goodEnd = /[.!?)}\]"']$/.test(last);
+  // If any tail line ends with an obvious fragment, fail
+  const fragment = tail.some((l) => {
+    const s = l.trimEnd();
+    return (
+      s.startsWith("-") &&
+      !/[.!?)}\]"']$/.test(s) &&
+      /[a-zA-Z0-9_]$/.test(s)
+    );
+  });
 
-  // “Bad” endings: common truncation patterns
-  const badEnd =
-    /(\u2264|\u2265|<|>|=|\+|\-|\*|\/|\(|\{|\[|,|:)$/.test(last) || // ends with operator/punct
-    /\b(imag|real|cos|sin|tan|theta|phase)\b$/i.test(last) ||       // ends on a half phrase like "imag"
-    /-\s*$/.test(last);
-
-  // If it doesn't end “good” and it smells “bad”, treat as not clean
-  if (!goodEnd && badEnd) return false;
-
-  // If it doesn't end good punctuation at all, still consider it suspicious
-  // (this catches plain cutoffs like "... imag")
-  if (!goodEnd) return false;
-
-  return true;
+  return goodEnd && !fragment;
 }
+
 
 function removeFragmentBullet(text: string) {
   const cleaned = stripEndMarker(text);
@@ -295,6 +290,12 @@ function removeFragmentBullet(text: string) {
     if (lines.length === 0) return "";
     last = lines[lines.length - 1].trim();
   }
+  // Drop lines that look like cut math/function definitions
+const cutMath = /(=\s*.*[a-zA-Z0-9_])$/.test(last) && !/[.!?)}\]"']$/.test(last);
+if (cutMath) lines.pop();
+
+if (last.trim() === "Homework Explain") lines.pop();
+
 
   // Drop trailing bullet fragment with no punctuation
   const endsOk = /[.!?)}\]"']$/.test(last);
