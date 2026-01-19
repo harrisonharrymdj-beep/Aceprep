@@ -3,15 +3,26 @@ import OpenAI from "openai";
 import * as pdfParseNS from "pdf-parse";
 import { Buffer } from "node:buffer";
 
+export const runtime = "nodejs";
 
+/**
+ * Extract text from PDF buffer (pdf-parse ESM/CJS safe import).
+ */
 async function extractPdfText(buffer: Buffer) {
   const pdfParse: any = (pdfParseNS as any).default ?? pdfParseNS;
   const data = await pdfParse(buffer);
   return (data?.text ?? "").trim();
 }
 
-
-export const runtime = "nodejs";
+/**
+ * Best-effort label extractor for chunks ("1", "1(a)", "3(b)(ii)", etc.)
+ */
+function extractProblemLabel(problemText: string) {
+  const m = problemText.match(
+    /(?:Problem\s*)?(\d+\s*(?:\([a-z]\))?(?:\([ivx]+\))?)/i
+  );
+  return m ? m[1].replace(/\s+/g, "") : "Problem";
+}
 
 /**
  * Lazy client (prevents build-time crashes)
@@ -28,7 +39,6 @@ function getClient() {
 
 /**
  * Model selection
- * - Use nano for cheap + fast once you pre-split the PDF.
  */
 function modelForTool(tool: string) {
   if (tool === "Homework Explain") return "gpt-5-mini"; // reliability
@@ -36,8 +46,7 @@ function modelForTool(tool: string) {
 }
 
 /**
- * Split assignment into "problem units".
- * This is intentionally heuristic (works well for typical EE homework PDFs).
+ * Split assignment into "problem units" (heuristic).
  */
 function splitIntoProblems(text: string) {
   const cleaned = text
@@ -56,7 +65,7 @@ function splitIntoProblems(text: string) {
     /\n(?=(?:Problem\s*)?\d+\s*(?:[\.\)]|\([a-z]\)|\([a-z]\)\([ivx]+\)|\([ivx]+\)))/i
   );
 
-const units = parts.map((p) => p.trim()).filter((p) => p.length > 40);
+  const units = parts.map((p) => p.trim()).filter((p) => p.length > 40);
 
   // Fallback if split fails (single big blob)
   if (units.length <= 1) {
@@ -87,9 +96,14 @@ function chunkByChars(text: string, maxChars = 2200) {
 }
 
 /**
- * Minimal prompt contract per tool (no retries / no continuation prompts).
+ * Minimal prompt contract per tool.
  */
-function buildPrompts(tool: string, notes: string, options?: any) {
+function buildPrompts(
+  tool: string,
+  notes: string,
+  options?: any,
+  label?: string
+) {
   const examType = String(options?.examType ?? "unspecified");
   const profEmphasis = String(options?.profEmphasis ?? "unspecified");
 
@@ -108,12 +122,13 @@ Rules:
 TASK: Homework Explain
 
 Instructions:
-- First line MUST be: [Problem]
+- First line MUST be: [${label ?? "Problem"}]
 - You will be given ONE problem chunk at a time.
 - Output exactly these sections:
   • What the problem is asking
   • Method / steps to solve
   • Common pitfalls
+- Each section must have at least 2 bullets.
 - High-level guidance only (no final numeric answers).
 - Use bullets.
 - End with ---END---.
@@ -123,7 +138,7 @@ Instructions:
 Exam type: ${examType}
 Professor emphasis: ${profEmphasis}
 
-PROBLEM TEXT (may include the label like 1(a), 2(b), etc):
+PROBLEM TEXT:
 <<<BEGIN
 ${notes}
 END>>>
@@ -195,7 +210,6 @@ function ensureEndMarker(text: string) {
 }
 
 function safeJoin(outputs: string[]) {
-  // strip extra END markers from intermediate chunks
   const cleaned = outputs
     .map((o) => (o ?? "").replace(/\s*---END---\s*$/g, "").trimEnd())
     .filter(Boolean);
@@ -214,6 +228,7 @@ async function readRequest(req: Request) {
     const fd = await req.formData();
     const tool = String(fd.get("tool") ?? "Study Guide");
     const notes = String(fd.get("notes") ?? "").trim();
+
     const optionsRaw = fd.get("options");
     let options: any = {};
     if (typeof optionsRaw === "string" && optionsRaw.trim()) {
@@ -224,14 +239,20 @@ async function readRequest(req: Request) {
       }
     }
 
-const pdfRaw = fd.get("pdf");
-const pdfFile = pdfRaw instanceof File ? pdfRaw : null;
-return { tool, notes, options, pdfFile };
+    const pdfRaw = fd.get("pdf");
+    const pdfFile = pdfRaw instanceof File ? pdfRaw : null;
 
+    return { tool, notes, options, pdfFile };
   }
 
-  // default JSON
-  const body = await req.json();
+  // JSON branch (safe parse)
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch {
+    body = {};
+  }
+
   const tool = String(body.tool ?? "Study Guide");
   const notes = String(body.notes ?? "").trim();
   const options = body.options ?? {};
@@ -242,7 +263,6 @@ export async function POST(req: Request) {
   try {
     const { tool, notes, options, pdfFile } = await readRequest(req);
 
-    // Optional: simple Pro gate placeholder
     const userIsPro = false;
     if (tool === "Exam Pack" && !userIsPro) {
       return Response.json({ error: "Exam Pack is Pro-only." }, { status: 403 });
@@ -251,52 +271,53 @@ export async function POST(req: Request) {
     const client = getClient();
     const model = modelForTool(tool);
 
-  // 1) If PDF uploaded, extract text server-side
-let materialText = notes;
+    // 1) Extract PDF text if uploaded
+    let materialText = notes;
 
-if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
-  const ab = await (pdfFile as File).arrayBuffer();
-  const buffer = Buffer.from(ab);
-  const extracted = await extractPdfText(buffer);
+    if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
+      const ab = await (pdfFile as File).arrayBuffer();
+      const buffer = Buffer.from(ab);
+      const extracted = await extractPdfText(buffer);
+      if (extracted) materialText = extracted;
 
-  if (extracted) materialText = extracted;
+      // guard: too little text extracted
+      if (!materialText || materialText.replace(/\s/g, "").length < 200) {
+        return Response.json(
+          {
+            error:
+              "I couldn't extract enough readable text from that PDF. Try another PDF or paste the text content.",
+          },
+          { status: 400 }
+        );
+      }
+    }
 
-  // ✅ guard: pdf extracted too little text
-  if (!materialText || materialText.replace(/\s/g, "").length < 200) {
-    return Response.json(
-      {
-        error:
-          "I couldn't extract enough readable text from that PDF. Try another PDF or paste the text content.",
-      },
-      { status: 400 }
-    );
-  }
-}
+    if (!materialText) {
+      return Response.json(
+        { error: "Paste notes or upload a PDF first." },
+        { status: 400 }
+      );
+    }
 
-// ✅ also guard for non-pdf requests
-if (!materialText) {
-  return Response.json(
-    { error: "Paste notes or upload a PDF first." },
-    { status: 400 }
-  );
-}
-
-
-    // 2) If Homework Explain, split into problems and process per-problem
+    // 2) Homework Explain: split -> per-problem calls
     if (tool === "Homework Explain") {
       const problems = splitIntoProblems(materialText);
 
-      // Budget controls (this is what makes ads/profit predictable)
-      // You can tune these to your ad strategy.
       const maxProblems = userIsPro ? 30 : 6;
-
-      // Per-problem output cap keeps responses tight + consistent
       const perProblemMaxOutputTokens = 450;
 
       const outputs: string[] = [];
-      for (const problemText of problems.slice(0, maxProblems)) {
-        const { system, developer, user } = buildPrompts(tool, problemText, options);
 
+      for (const problemText of problems.slice(0, maxProblems)) {
+        const label = extractProblemLabel(problemText);
+        const { system, developer, user } = buildPrompts(
+          tool,
+          problemText,
+          options,
+          label
+        );
+
+        // First attempt (mini)
         const resp = await client.responses.create({
           model,
           input: [
@@ -307,7 +328,34 @@ if (!materialText) {
           max_output_tokens: perProblemMaxOutputTokens,
         });
 
-        const out = ensureEndMarker((resp as any).output_text ?? "");
+        let out = ensureEndMarker((resp as any).output_text ?? "");
+        const bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
+
+        // If model returned basically nothing, retry once with stricter instruction
+        if (bodyOnly.length < 120) {
+          const resp2 = await client.responses.create({
+            model: "gpt-5-mini",
+            input: [
+              { role: "system", content: system },
+              {
+                role: "developer",
+                content:
+                  developer +
+                  `
+
+CRITICAL:
+- Do NOT output only ---END---.
+- You MUST include all 3 sections with at least 2 bullets each.
+- If the chunk is unclear, still write generic but relevant steps for this type of problem.
+`,
+              },
+              { role: "user", content: user },
+            ],
+            max_output_tokens: perProblemMaxOutputTokens,
+          });
+          out = ensureEndMarker((resp2 as any).output_text ?? out);
+        }
+
         outputs.push(out);
       }
 
