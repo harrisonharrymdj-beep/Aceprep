@@ -3,19 +3,11 @@ import OpenAI from "openai";
 import { Buffer } from "node:buffer";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-function getClient() {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing OPENAI_API_KEY. Set it in .env.local or Vercel env vars.");
-  }
-  return new OpenAI({ apiKey });
-}
+export const dynamic = "force-dynamic"; // avoid caching / edge weirdness
 
 /**
  * Extract text from PDF buffer.
- * Dynamic import prevents Turbopack ESM default-export errors.
+ * Uses dynamic import to avoid Turbopack build issues with pdf-parse.
  */
 async function extractPdfText(buffer: Buffer) {
   const pdfParseNS: any = await import("pdf-parse");
@@ -25,18 +17,276 @@ async function extractPdfText(buffer: Buffer) {
 }
 
 /**
- * Never fabricate ---END--- if model returned empty.
+ * Lazy OpenAI client
  */
-function ensureEndMarker(text: string) {
-  const t = (text ?? "").trim();
-  if (!t) return "";
-  if (t.endsWith("---END---")) return t;
-  return t + "\n---END---";
+function getClient() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "Missing OPENAI_API_KEY. Set it in .env.local or Vercel Environment Variables."
+    );
+  }
+  return new OpenAI({ apiKey });
 }
 
 /**
- * Homework Explain quality gate:
- * Must have 3 sections + bullets, and not be tiny.
+ * Model selection
+ */
+function modelForTool(tool: string) {
+  if (tool === "Homework Explain") return "gpt-5-mini"; // reliability
+  return "gpt-5-nano"; // cheap for other tools
+}
+
+/**
+ * Detects likely problem labels from text.
+ * Used only for LAST resort fallback.
+ */
+function detectProblemLabels(text: string) {
+  const found = new Set<string>();
+
+  // "Problem 1", "Problem 2(a)"
+  for (const m of text.matchAll(
+    /(?:^|\n)\s*Problem\s*(\d+)(\([a-z]\))?(\([ivx]+\))?/gi
+  )) {
+    const label = `${m[1]}${m[2] ?? ""}${m[3] ?? ""}`.replace(/\s+/g, "");
+    found.add(label);
+  }
+
+  // "1(a)" / "3(b)(ii)" near line starts
+  for (const m of text.matchAll(
+    /(?:^|\n)\s*(\d+)\s*(\([a-z]\))(\([ivx]+\))?/gi
+  )) {
+    const label = `${m[1]}${m[2] ?? ""}${m[3] ?? ""}`.replace(/\s+/g, "");
+    found.add(label);
+  }
+
+  // "1." "2)" at line starts, but only if the doc has subparts
+  const hasSubparts = /\(\s*[a-z]\s*\)/i.test(text);
+  if (hasSubparts) {
+    for (const m of text.matchAll(/(?:^|\n)\s*(\d+)\s*([.)])/g)) {
+      const label = `${m[1]}`.trim();
+      if (label.length <= 3) found.add(label);
+    }
+  }
+
+  const arr = Array.from(found);
+  arr.sort((a, b) => {
+    const an = parseInt(a, 10);
+    const bn = parseInt(b, 10);
+    if (an !== bn) return an - bn;
+    return a.localeCompare(b);
+  });
+
+  return arr;
+}
+
+/**
+ * Last-resort fallback (guaranteed formatted output).
+ */
+function fallbackHomeworkExplainFromLabels(labels: string[]) {
+  const useLabels = labels.length >= 2 ? labels : ["Homework-1", "Homework-2"];
+
+  const blocks = useLabels.slice(0, 10).map((label) => {
+    return `
+[${label}]
+- What the problem is asking:
+  - Identify what quantity the problem wants (value, sketch, property, transform, etc.).
+  - Restate the required final format (e.g., rectangular vs. polar, labeled sketch, etc.).
+- Method / steps to solve:
+  - Rewrite the given expression clearly and simplify step-by-step.
+  - If complex numbers: convert between rectangular/polar as needed and track magnitude/phase carefully.
+  - If signals: map time-shift/scale/reversal operations by transforming key time points and amplitudes.
+- Common pitfalls:
+  - Skipping algebra steps and losing signs or j factors.
+  - Using the wrong convention (degrees vs radians, atan vs atan2 quadrant).
+  - Applying time transforms in the wrong direction or order.
+`.trim();
+  });
+
+  return blocks.join("\n\n").trim() + "\n---END---";
+}
+
+/**
+ * Split PDF text into subproblem chunks for the common formatting:
+ *   1. ... (header)
+ *     (a) ...
+ *     (b) ...
+ *   2. ...
+ *     (a) ...
+ * This produces chunks whose FIRST LINE is "1(a)" etc. for easy labeling.
+ */
+function splitIntoProblems(text: string) {
+  const cleaned = text
+    .replace(/\r/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  // Split into top-level blocks: "1." "2." at line start
+  const topBlocks = cleaned
+    .split(/\n(?=\d+\.\s)/g)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const out: string[] = [];
+
+  for (const block of topBlocks) {
+    const mainMatch = block.match(/^(\d+)\.\s/m);
+    const mainNum = mainMatch ? mainMatch[1] : null;
+
+    const hasSub = /\n\([a-z]\)\s/m.test(block);
+
+    if (mainNum && hasSub) {
+      // Split at "(a)" "(b)" etc
+      const parts = block
+        .split(/\n(?=\([a-z]\)\s)/g)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      // Header is any text before first "(a)"
+      const header = parts.length && !parts[0].startsWith("(") ? parts[0] : "";
+
+      for (const p of parts) {
+        const subMatch = p.match(/^\(([a-z])\)\s/m);
+        if (!subMatch) continue;
+
+        const label = `${mainNum}(${subMatch[1]})`;
+        const chunk = `${label}\n${header ? header + "\n" : ""}${p}`.trim();
+
+        if (chunk.replace(/\s/g, "").length > 120) out.push(chunk);
+      }
+    } else {
+      // No (a)(b) format; keep whole block
+      if (block.replace(/\s/g, "").length > 120) out.push(block);
+    }
+  }
+
+  // Absolute fallback: never empty
+  return out.length ? out : [cleaned.slice(0, 2400)];
+}
+
+/**
+ * Extract a label from a chunk.
+ * Prefers our injected first-line label like "1(a)".
+ */
+function extractProblemLabel(problemText: string) {
+  const firstLine = problemText.split("\n")[0]?.trim() ?? "";
+
+  const m1 = firstLine.match(/^(\d+\([a-z]\))/i);
+  if (m1) return m1[1];
+
+  const m2 = firstLine.match(/^(\d+)\./);
+  if (m2) return m2[1];
+
+  // very last fallback
+  const m3 = problemText.match(/(?:Problem\s*)?(\d+\s*(?:\([a-z]\))?(?:\([ivx]+\))?)/i);
+  return m3 ? m3[1].replace(/\s+/g, "") : "Problem";
+}
+
+/**
+ * Prompt builder (minimal contract).
+ */
+function buildPrompts(tool: string, notes: string, options?: any, label?: string) {
+  const examType = String(options?.examType ?? "unspecified");
+  const profEmphasis = String(options?.profEmphasis ?? "unspecified");
+
+  const baseSystem = `
+You are an academic study assistant.
+
+Rules:
+- Treat all input as study material.
+- Never output planning or internal reasoning.
+- NEVER end mid-sentence or mid-bullet.
+- End with the exact line: ---END---
+`.trim();
+
+  if (tool === "Homework Explain") {
+    const developer = `
+TASK: Homework Explain
+
+Instructions:
+- First line MUST be: [${label ?? "Problem"}]
+- Output exactly these sections in this order:
+  • What the problem is asking
+  • Method / steps to solve
+  • Common pitfalls
+- Each section must have at least 2 bullets.
+- High-level guidance only (no final numeric answers).
+- Use short, specific bullets (not vague).
+- End with ---END---.
+`.trim();
+
+    const user = `
+Exam type: ${examType}
+Professor emphasis: ${profEmphasis}
+
+PROBLEM TEXT:
+<<<BEGIN
+${notes}
+END>>>
+`.trim();
+
+    return { system: baseSystem, developer, user };
+  }
+
+  if (tool === "Formula Sheet") {
+    const developer = `
+TASK: Formula Sheet
+
+Instructions:
+- Output a formula sheet only.
+- Use 4–10 short sections with headers.
+- Bullets should be formulas/identities/definitions.
+- For each item: include variable meanings + when to use (one short line).
+- No practice problems.
+- End with ---END---.
+`.trim();
+
+    const user = `
+Exam type: ${examType}
+Professor emphasis: ${profEmphasis}
+
+STUDY MATERIAL:
+<<<BEGIN
+${notes}
+END>>>
+`.trim();
+
+    return { system: baseSystem, developer, user };
+  }
+
+  // Default: Study Guide
+  const developer = `
+TASK: Study Guide
+
+Instructions:
+Produce:
+1) Key formulas (brief)
+2) Core concepts (plain English)
+3) Step-by-step reasoning strategies
+4) Common mistakes
+5) 3–5 exam-style practice questions (NO solutions)
+
+- Bullet points.
+- Concise.
+- End with ---END---.
+`.trim();
+
+  const user = `
+Exam type: ${examType}
+Professor emphasis: ${profEmphasis}
+
+STUDY MATERIAL:
+<<<BEGIN
+${notes}
+END>>>
+`.trim();
+
+  return { system: baseSystem, developer, user };
+}
+
+/**
+ * Validation: reject too-short / vague Homework Explain blocks.
  */
 function looksTooShortHomeworkExplain(text: string) {
   const body = (text ?? "").replace(/\s*---END---\s*$/g, "").trim();
@@ -46,11 +296,28 @@ function looksTooShortHomeworkExplain(text: string) {
   const hasPitfalls = /Common pitfalls/i.test(body);
 
   const bullets = (body.match(/^\s*[-•]\s+/gm) ?? []).length;
-
-  // Raise this threshold so it can't pass with a generic two-liner.
-  const longEnough = body.length >= 500;
+  const longEnough = body.length >= 350;
 
   return !(hasAsking && hasMethod && hasPitfalls && bullets >= 6 && longEnough);
+}
+
+/**
+ * Do NOT fabricate ---END--- if empty.
+ */
+function ensureEndMarker(text: string) {
+  const t = (text ?? "").trim();
+  if (!t) return "";
+  if (t.endsWith("---END---")) return t;
+  return t + "\n---END---";
+}
+
+function safeJoin(outputs: string[]) {
+  const cleaned = outputs
+    .map((o) => (o ?? "").replace(/\s*---END---\s*$/g, "").trimEnd())
+    .filter((o) => o.trim().length > 0);
+
+  const combined = cleaned.join("\n\n").trim();
+  return ensureEndMarker(combined);
 }
 
 /**
@@ -76,10 +343,11 @@ async function readRequest(req: Request) {
 
     const pdfRaw = fd.get("pdf");
     const pdfFile = pdfRaw instanceof File ? pdfRaw : null;
+
     return { tool, notes, options, pdfFile };
   }
 
-  // JSON safe parse
+  // JSON (safe parse)
   let body: any = {};
   try {
     body = await req.json();
@@ -95,140 +363,19 @@ async function readRequest(req: Request) {
   };
 }
 
-/**
- * Model selection.
- * - Use mini for Homework Explain for formatting reliability.
- * - Use nano for cheaper tasks.
- */
-function modelForTool(tool: string) {
-  if (tool === "Homework Explain") return "gpt-5-mini";
-  return "gpt-5-nano";
-}
-
-/**
- * ===== NEW: Deterministic problem extraction (Map step) =====
- * Instead of regex-splitting, ask the model to return JSON with:
- * [{ label: "1(a)", text: "..." }, ...]
- */
-async function extractProblemsWithModel(client: OpenAI, materialText: string) {
-  const system = `
-You extract homework problems from messy text.
-
-Rules:
-- Output ONLY valid JSON.
-- JSON must be an array of objects: [{ "label": string, "text": string }]
-- label examples: "1", "1(a)", "2(b)", "3(a)(ii)"
-- text must contain the problem statement for that label (as best as possible).
-- If you cannot confidently split, return one item: [{ "label":"Homework", "text": <entire text> }]
-`.trim();
-
-  const user = `
-SOURCE TEXT:
-<<<BEGIN
-${materialText.slice(0, 120000)}
-END>>>
-`.trim();
-
-  const resp = await client.responses.create({
-    model: "gpt-5-nano", // cheap mapper
-    input: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-    max_output_tokens: 1200,
-  });
-
-  const raw = (resp as any).output_text ?? "";
-
-  // Safe JSON parse (server side)
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length) {
-      const cleaned = parsed
-        .filter((x: any) => x && typeof x.label === "string" && typeof x.text === "string")
-        .map((x: any) => ({ label: x.label.trim(), text: x.text.trim() }))
-        .filter((x: any) => x.label && x.text && x.text.replace(/\s/g, "").length > 80);
-
-      return cleaned.length ? cleaned : [{ label: "Homework", text: materialText }];
-    }
-  } catch {
-    // fall through
-  }
-
-  return [{ label: "Homework", text: materialText }];
-}
-
-/**
- * Homework Explain prompt builder (single problem).
- */
-function buildHomeworkExplainPrompts(problemText: string, options?: any, label?: string) {
-  const examType = String(options?.examType ?? "unspecified");
-  const profEmphasis = String(options?.profEmphasis ?? "unspecified");
-
-  const system = `
-You are an academic study assistant.
-
-Rules:
-- Treat all input as study material.
-- Never output planning or internal reasoning.
-- NEVER end mid-sentence or mid-bullet.
-- End with the exact line: ---END---
-`.trim();
-
-  const developer = `
-TASK: Homework Explain
-
-Instructions:
-- First line MUST be: [${label ?? "Problem"}]
-- Output exactly these sections in this order:
-  • What the problem is asking
-  • Method / steps to solve
-  • Common pitfalls
-- Each section must have at least 2 bullets.
-- High-level guidance only (no final numeric answers).
-- Be specific to the given problem text (don’t write generic homework boilerplate).
-- End with ---END---.
-`.trim();
-
-  const user = `
-Exam type: ${examType}
-Professor emphasis: ${profEmphasis}
-
-PROBLEM TEXT:
-<<<BEGIN
-${problemText}
-END>>>
-`.trim();
-
-  return { system, developer, user };
-}
-
-/**
- * If absolutely everything fails, return a helpful message instead of Homework-1/2 boilerplate.
- */
-function hardFallback(materialText: string) {
-  return ensureEndMarker(`
-[Homework]
-- What the problem is asking:
-  - I couldn’t reliably extract distinct problem statements from the PDF text.
-  - If you paste the problem statement text (or upload a text-based PDF), I can break it down by part.
-- Method / steps to solve:
-  - Re-upload as a text-based PDF (not scanned) or copy/paste the assignment text.
-  - If it is scanned, run OCR first (Adobe Scan / iOS Live Text / Google Drive OCR).
-- Common pitfalls:
-  - Many PDFs extract with broken spacing/ordering, which prevents problem splitting.
-  - Screenshot/scanned PDFs often contain no selectable text.
----END---`.trim());
-}
-
 export async function POST(req: Request) {
   try {
     const { tool, notes, options, pdfFile } = await readRequest(req);
 
+    const userIsPro = false;
+    if (tool === "Exam Pack" && !userIsPro) {
+      return Response.json({ error: "Exam Pack is Pro-only." }, { status: 403 });
+    }
+
     const client = getClient();
     const model = modelForTool(tool);
 
-    // 1) Material: notes or extracted PDF
+    // Material text: notes or extracted PDF
     let materialText = notes;
 
     if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
@@ -239,44 +386,59 @@ export async function POST(req: Request) {
     }
 
     if (!materialText) {
-      return Response.json({ error: "Paste notes or upload a PDF first." }, { status: 400 });
-    }
-
-    if (materialText.replace(/\s/g, "").length < 200) {
       return Response.json(
-        { error: "I couldn't extract enough readable text from that PDF. If it's scanned, use a text-based PDF or paste the text." },
+        { error: "Paste notes or upload a PDF first." },
         { status: 400 }
       );
     }
 
-    // ===== Homework Explain path (Map-Reduce) =====
-    if (tool === "Homework Explain") {
-      // Map: extract problems deterministically (cheap)
-      const extractedProblems = await extractProblemsWithModel(client, materialText);
+    // Guard: too little text (scanned PDF, failed extraction, etc.)
+    if (materialText.replace(/\s/g, "").length < 120) {
+      return Response.json(
+        {
+          error:
+            "I couldn't extract enough readable text from that PDF. If it's scanned, try a text-based PDF or paste the problem text.",
+        },
+        { status: 400 }
+      );
+    }
 
-      // Limit for free tier
-      const userIsPro = false;
+    // Homework Explain: split -> per-problem calls
+    if (tool === "Homework Explain") {
+      const problems = splitIntoProblems(materialText);
+
       const maxProblems = userIsPro ? 30 : 6;
+      const perProblemMaxOutputTokens = 500;
 
       const outputs: string[] = [];
 
-      for (const p of extractedProblems.slice(0, maxProblems)) {
-        const { system, developer, user } = buildHomeworkExplainPrompts(p.text, options, p.label);
+      for (const problemText of problems.slice(0, maxProblems)) {
+        // light guard only
+        if (problemText.replace(/\s/g, "").length < 120) continue;
 
-        // Reduce: generate explanation per problem (reliable)
+        const label = extractProblemLabel(problemText);
+        const { system, developer, user } = buildPrompts(
+          tool,
+          problemText,
+          options,
+          label
+        );
+
+        // Attempt 1
         const resp = await client.responses.create({
-          model: "gpt-5-mini",
+          model,
           input: [
             { role: "system", content: system },
             { role: "developer", content: developer },
             { role: "user", content: user },
           ],
-          max_output_tokens: 520,
+          max_output_tokens: perProblemMaxOutputTokens,
         });
 
         let out = ensureEndMarker((resp as any).output_text ?? "");
-        if (!out || looksTooShortHomeworkExplain(out)) {
-          // Retry once, stricter
+
+        // Retry once if too short/vague
+        if (looksTooShortHomeworkExplain(out)) {
           const resp2 = await client.responses.create({
             model: "gpt-5-mini",
             input: [
@@ -288,34 +450,28 @@ export async function POST(req: Request) {
                   `
 
 CRITICAL:
-- Do NOT be generic.
-- You MUST reference details from the PROBLEM TEXT (symbols, operations, required outputs).
-- Still no final numeric answers.
+- Do NOT output only one bullet per section.
+- You MUST produce 3 sections with at least 2 bullets each.
+- Be specific to the given text (do not be generic).
 `.trim(),
               },
               { role: "user", content: user },
             ],
-            max_output_tokens: 650,
+            max_output_tokens: perProblemMaxOutputTokens,
           });
 
           out = ensureEndMarker((resp2 as any).output_text ?? out);
         }
 
-        if (out && !looksTooShortHomeworkExplain(out)) {
-          // Strip END markers in join; add once at end
-          outputs.push(out.replace(/\s*---END---\s*$/g, "").trimEnd());
-        }
+        if (!looksTooShortHomeworkExplain(out)) outputs.push(out);
       }
 
+      // Salvage mode: whole-doc attempt if chunking failed
       if (!outputs.length) {
-        return Response.json({ output: hardFallback(materialText) });
-      }
+        const labels = detectProblemLabels(materialText);
+        const labelPreview = labels.slice(0, 12).join(", ") || "unknown";
 
-      return Response.json({ output: ensureEndMarker(outputs.join("\n\n").trim()) });
-    }
-
-    // ===== Other tools (single pass, keep your existing behavior) =====
-    const system = `
+        const forcedSystem = `
 You are an academic study assistant.
 
 Rules:
@@ -325,41 +481,66 @@ Rules:
 - End with the exact line: ---END---
 `.trim();
 
-    const developer =
-      tool === "Formula Sheet"
-        ? `
-TASK: Formula Sheet
+        const forcedDeveloper = `
+TASK: Homework Explain (salvage mode)
+
 Instructions:
-- Output a formula sheet only.
-- Use 4–10 short sections with headers.
-- Bullets should be formulas/identities/definitions.
-- For each item: include variable meanings + when to use (one short line).
-- No practice problems.
-- End with ---END---.
-`.trim()
-        : `
-TASK: Study Guide
-Instructions:
-Produce:
-1) Key formulas (brief)
-2) Core concepts (plain English)
-3) Step-by-step reasoning strategies
-4) Common mistakes
-5) 3–5 exam-style practice questions (NO solutions)
-- Bullet points.
-- Concise.
+- The PDF text may be messy. Still produce useful guidance.
+- Cover at least 2 distinct problems/subparts if possible.
+- Use this exact format per block:
+
+[ProblemLabel]
+- What the problem is asking:
+  - ...
+  - ...
+- Method / steps to solve:
+  - ...
+  - ...
+- Common pitfalls:
+  - ...
+  - ...
+
+- No final numeric answers.
+- Do not be vague.
 - End with ---END---.
 `.trim();
 
-    const user = `
-Exam type: ${String(options?.examType ?? "unspecified")}
-Professor emphasis: ${String(options?.profEmphasis ?? "unspecified")}
+        const forcedUser = `
+Detected labels (may be incomplete): ${labelPreview}
 
 STUDY MATERIAL:
 <<<BEGIN
 ${materialText}
 END>>>
 `.trim();
+
+        const resp = await client.responses.create({
+          model: "gpt-5-mini",
+          input: [
+            { role: "system", content: forcedSystem },
+            { role: "developer", content: forcedDeveloper },
+            { role: "user", content: forcedUser },
+          ],
+          max_output_tokens: 1400,
+        });
+
+        const out = ensureEndMarker((resp as any).output_text ?? "");
+
+        if (!looksTooShortHomeworkExplain(out)) {
+          return Response.json({ output: out });
+        }
+
+        // Final fallback: labels-based generic blocks
+        return Response.json({
+          output: fallbackHomeworkExplainFromLabels(labels),
+        });
+      }
+
+      return Response.json({ output: safeJoin(outputs) });
+    }
+
+    // Other tools: single pass
+    const { system, developer, user } = buildPrompts(tool, materialText, options);
 
     const resp = await client.responses.create({
       model,
@@ -371,12 +552,19 @@ END>>>
       max_output_tokens: tool === "Formula Sheet" ? 1600 : 1800,
     });
 
-    const out = ensureEndMarker((resp as any).output_text ?? "");
-    if (!out) {
-      return Response.json({ error: "Model returned empty output. Try again." }, { status: 500 });
+    const output = ensureEndMarker((resp as any).output_text ?? "");
+    if (!output) {
+      return Response.json(
+        { error: "Model returned empty output. Try again or use a different model." },
+        { status: 500 }
+      );
     }
-    return Response.json({ output: out });
+
+    return Response.json({ output });
   } catch (err: any) {
-    return Response.json({ error: err?.message ?? "Server error" }, { status: 500 });
+    return Response.json(
+      { error: err?.message ?? "Server error" },
+      { status: 500 }
+    );
   }
 }
