@@ -2,6 +2,7 @@
 import OpenAI from "openai";
 import { Buffer } from "node:buffer";
 
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic"; // avoid caching / edge weirdness
 
@@ -105,65 +106,141 @@ function fallbackHomeworkExplainFromLabels(labels: string[]) {
 
   return blocks.join("\n\n").trim() + "\n---END---";
 }
+/**
+ * Fallback chunker if numbering-based splitting fails.
+ * Never returns an empty array.
+ */
+function chunkByChars(text: string, maxChars = 2400) {
+  const t = (text ?? "").replace(/\r/g, "").trim();
+  if (!t) return [];
+
+  const lines = t.split("\n");
+  const chunks: string[] = [];
+  let cur = "";
+
+  for (const line of lines) {
+    const next = cur ? cur + "\n" + line : line;
+
+    if (next.length > maxChars) {
+      const pushed = cur.trim();
+      if (pushed) chunks.push(pushed);
+      cur = line;
+    } else {
+      cur = next;
+    }
+  }
+
+  const last = cur.trim();
+  if (last) chunks.push(last);
+
+  // Absolute fallback: guarantee at least 1 chunk
+  return chunks.length ? chunks : [t.slice(0, maxChars)];
+}
 
 /**
- * Split PDF text into subproblem chunks for the common formatting:
- *   1. ... (header)
- *     (a) ...
- *     (b) ...
- *   2. ...
- *     (a) ...
- * This produces chunks whose FIRST LINE is "1(a)" etc. for easy labeling.
+ * Robust splitter for EE homework PDFs:
+ * - Splits by top-level problems: "1.", "2.", "3.", ...
+ * - Then splits into subparts like "(a)", "(b)"
+ * - Then splits roman subparts like "(i)", "(ii)"
+ *
+ * Returns chunks that are "one thing" for the model to explain.
  */
 function splitIntoProblems(text: string) {
-  const cleaned = text
+  const cleaned = (text ?? "")
     .replace(/\r/g, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  // Split into top-level blocks: "1." "2." at line start
-  const topBlocks = cleaned
-    .split(/\n(?=\d+\.\s)/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  if (!cleaned) return [];
 
-  const out: string[] = [];
+  // ---------- 1) Split by top-level problems: lines starting with "1." / "2." etc ----------
+  const topMatches = Array.from(
+    cleaned.matchAll(/(?:^|\n)\s*(\d+)\.\s+/g)
+  );
 
-  for (const block of topBlocks) {
-    const mainMatch = block.match(/^(\d+)\.\s/m);
-    const mainNum = mainMatch ? mainMatch[1] : null;
+  // If we couldn't find top-level numbering, fallback to your char chunker.
+  if (topMatches.length === 0) return chunkByChars(cleaned, 2400);
 
-    const hasSub = /\n\([a-z]\)\s/m.test(block);
+  const topChunks: { label: string; body: string }[] = [];
 
-    if (mainNum && hasSub) {
-      // Split at "(a)" "(b)" etc
-      const parts = block
-        .split(/\n(?=\([a-z]\)\s)/g)
-        .map((s) => s.trim())
-        .filter(Boolean);
+  for (let i = 0; i < topMatches.length; i++) {
+    const start = topMatches[i].index ?? 0;
+    const end =
+      i + 1 < topMatches.length ? (topMatches[i + 1].index ?? cleaned.length) : cleaned.length;
 
-      // Header is any text before first "(a)"
-      const header = parts.length && !parts[0].startsWith("(") ? parts[0] : "";
+    const label = topMatches[i][1]; // "1", "2", "3"...
+    const body = cleaned.slice(start, end).trim();
+    if (body.replace(/\s/g, "").length > 60) topChunks.push({ label, body });
+  }
 
-      for (const p of parts) {
-        const subMatch = p.match(/^\(([a-z])\)\s/m);
-        if (!subMatch) continue;
+  // ---------- 2) Split each top-level chunk into (a), (b), ... if present ----------
+  const finalChunks: string[] = [];
 
-        const label = `${mainNum}(${subMatch[1]})`;
-        const chunk = `${label}\n${header ? header + "\n" : ""}${p}`.trim();
+  for (const tc of topChunks) {
+    const hasLetterParts = /(?:^|\n)\s*\([a-z]\)\s+/i.test(tc.body);
 
-        if (chunk.replace(/\s/g, "").length > 120) out.push(chunk);
+    if (!hasLetterParts) {
+      finalChunks.push(tc.body);
+      continue;
+    }
+
+    const partMatches = Array.from(
+      tc.body.matchAll(/(?:^|\n)\s*\(([a-z])\)\s+/gi)
+    );
+
+    // If something weird happened, keep the whole chunk.
+    if (partMatches.length === 0) {
+      finalChunks.push(tc.body);
+      continue;
+    }
+
+    for (let i = 0; i < partMatches.length; i++) {
+      const start = partMatches[i].index ?? 0;
+      const end =
+        i + 1 < partMatches.length ? (partMatches[i + 1].index ?? tc.body.length) : tc.body.length;
+
+      const letter = partMatches[i][1].toLowerCase(); // "a", "b", ...
+      const piece = tc.body.slice(start, end).trim();
+
+      // ---------- 3) Further split roman (i), (ii) inside that letter-part ----------
+      const hasRoman = /(?:^|\n)\s*\((iv|v?i{1,3}|ix|x)\)\s+/i.test(piece);
+
+      if (!hasRoman) {
+        finalChunks.push(`${tc.label}(${letter})\n${piece}`);
+        continue;
       }
-    } else {
-      // No (a)(b) format; keep whole block
-      if (block.replace(/\s/g, "").length > 120) out.push(block);
+
+      const romanMatches = Array.from(
+        piece.matchAll(/(?:^|\n)\s*\(((?:iv|v?i{1,3}|ix|x))\)\s+/gi)
+      );
+
+      if (romanMatches.length === 0) {
+        finalChunks.push(`${tc.label}(${letter})\n${piece}`);
+        continue;
+      }
+
+      for (let j = 0; j < romanMatches.length; j++) {
+        const rStart = romanMatches[j].index ?? 0;
+        const rEnd =
+          j + 1 < romanMatches.length
+            ? (romanMatches[j + 1].index ?? piece.length)
+            : piece.length;
+
+        const roman = romanMatches[j][1].toLowerCase(); // "i", "ii", ...
+        const romanPiece = piece.slice(rStart, rEnd).trim();
+
+        finalChunks.push(`${tc.label}(${letter})(${roman})\n${romanPiece}`);
+      }
     }
   }
 
-  // Absolute fallback: never empty
-  return out.length ? out : [cleaned.slice(0, 2400)];
+  // Filter out junk
+  return finalChunks
+    .map((c) => c.trim())
+    .filter((c) => c.replace(/\s/g, "").length > 120);
 }
+
 
 /**
  * Extract a label from a chunk.
@@ -210,11 +287,16 @@ Instructions:
   • What the problem is asking
   • Method / steps to solve
   • Common pitfalls
+
+Hard requirements (IMPORTANT):
 - Each section must have at least 2 bullets.
+- You MUST reference at least 2 exact symbols/phrases from PROBLEM TEXT (e.g., "q =", "abcdf", "w(t)", "cos(2πt)", "u(t+2)").
+- Do NOT be generic. If the problem text contains an equation, explicitly describe the steps for THAT equation type.
 - High-level guidance only (no final numeric answers).
-- Use short, specific bullets (not vague).
+- Use short bullets.
 - End with ---END---.
 `.trim();
+
 
     const user = `
 Exam type: ${examType}
@@ -296,7 +378,7 @@ function looksTooShortHomeworkExplain(text: string) {
   const hasPitfalls = /Common pitfalls/i.test(body);
 
   const bullets = (body.match(/^\s*[-•]\s+/gm) ?? []).length;
-  const longEnough = body.length >= 350;
+  const longEnough = body.length >= 220;
 
   return !(hasAsking && hasMethod && hasPitfalls && bullets >= 6 && longEnough);
 }
@@ -384,6 +466,11 @@ export async function POST(req: Request) {
       const extracted = await extractPdfText(buffer);
       if (extracted) materialText = extracted;
     }
+
+    // ✅ DEBUG: confirm what the route actually received/extracted
+console.log("tool:", tool);
+console.log("materialText length:", materialText?.length ?? 0);
+console.log("materialText head:", (materialText ?? "").slice(0, 500));
 
     if (!materialText) {
       return Response.json(
@@ -567,4 +654,7 @@ END>>>
       { status: 500 }
     );
   }
+}
+export async function GET() {
+  return Response.json({ ok: true, route: "/api/aceprep" });
 }
