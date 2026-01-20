@@ -3,35 +3,21 @@ import OpenAI from "openai";
 import { Buffer } from "node:buffer";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-// (Optional) helps on serverless if you ever hit timeouts
-export const maxDuration = 60;
+export const dynamic = "force-dynamic"; // avoid caching / edge weirdness
 
 /**
  * Extract text from PDF buffer.
- * Use dynamic import to avoid Turbopack build issues.
+ * Uses dynamic import to avoid Turbopack build issues with pdf-parse.
  */
 async function extractPdfText(buffer: Buffer) {
   const pdfParseNS: any = await import("pdf-parse");
   const pdfParse: any = pdfParseNS.default ?? pdfParseNS;
-
   const data = await pdfParse(buffer);
   return (data?.text ?? "").trim();
 }
 
 /**
- * Best-effort label extractor ("1", "1(a)", "3(b)(ii)", etc.)
- */
-function extractProblemLabel(problemText: string) {
-  const m = problemText.match(
-    /(?:Problem\s*)?(\d+\s*(?:\([a-z]\))?(?:\([ivx]+\))?)/i
-  );
-  return m ? m[1].replace(/\s+/g, "") : "Problem";
-}
-
-/**
- * Lazy client
+ * Lazy OpenAI client
  */
 function getClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -47,157 +33,180 @@ function getClient() {
  * Model selection
  */
 function modelForTool(tool: string) {
+  // Homework Explain needs reliability
   if (tool === "Homework Explain") return "gpt-5-mini";
+  // Everything else can be cheap
   return "gpt-5-nano";
 }
 
 /**
- * Split into "problem units" (heuristic).
+ * Fallback chunker (SAFE, always returns at least 1 chunk)
+ */
+function chunkByChars(text: string, maxChars = 2400) {
+  const t = (text ?? "").trim();
+  if (!t) return [];
+  const lines = t.split("\n");
+
+  const chunks: string[] = [];
+  let cur = "";
+
+  for (const line of lines) {
+    const next = (cur ? cur + "\n" : "") + line;
+    if (next.length > maxChars) {
+      const c = cur.trim();
+      if (c.length > 150) chunks.push(c);
+      cur = line;
+    } else {
+      cur = next;
+    }
+  }
+
+  const last = cur.trim();
+  if (last.length > 150) chunks.push(last);
+
+  return chunks.length ? chunks : [t.slice(0, maxChars)];
+}
+
+/**
+ * Robust splitter for your EE homework PDF format:
+ * - Split by top-level "1.", "2.", "3." at line start
+ * - Then split by "(a)", "(b)" at line start
+ * - Then split by roman "(i)", "(ii)" at line start
  */
 function splitIntoProblems(text: string) {
-  const cleaned = text
+  const cleaned = (text ?? "")
     .replace(/\r/g, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  const parts = cleaned.split(
-    /\n(?=(?:Problem\s*)?\d+\s*(?:[\.\)]|\([a-z]\)|\([a-z]\)\([ivx]+\)|\([ivx]+\)))/i
-  );
+  if (!cleaned) return [];
 
-  const units = parts
-    .map((p) => p.trim())
-    .filter((p) => p.length > 140)
-    .filter((p) => /[a-z0-9]/i.test(p));
+  // Top-level: "1." "2." ...
+  const topMatches = Array.from(cleaned.matchAll(/(?:^|\n)\s*(\d+)\.\s+/g));
+  if (topMatches.length === 0) return chunkByChars(cleaned, 2400);
 
-  if (units.length <= 1) return chunkByChars(cleaned, 2200);
-  return units;
-}
+  const topChunks: { label: string; body: string }[] = [];
+  for (let i = 0; i < topMatches.length; i++) {
+    const start = topMatches[i].index ?? 0;
+    const end =
+      i + 1 < topMatches.length
+        ? (topMatches[i + 1].index ?? cleaned.length)
+        : cleaned.length;
 
-/**
- * Fallback chunker
- */
-function chunkByChars(text: string, maxChars = 2200) {
-  const lines = text.split("\n");
-  const chunks: string[] = [];
-  let cur = "";
+    const label = topMatches[i][1]; // "1", "2", ...
+    const body = cleaned.slice(start, end).trim();
+    if (body.replace(/\s/g, "").length > 120) topChunks.push({ label, body });
+  }
 
-  for (const line of lines) {
-    if ((cur + line + "\n").length > maxChars) {
-      if (cur.trim().length > 200) chunks.push(cur.trim());
-      cur = "";
+  const finalChunks: string[] = [];
+
+  for (const tc of topChunks) {
+    // Letter parts: "(a)", "(b)" ...
+    const partMatches = Array.from(tc.body.matchAll(/(?:^|\n)\s*\(([a-z])\)\s+/gi));
+
+    if (partMatches.length === 0) {
+      finalChunks.push(`${tc.label}.\n${tc.body}`.trim());
+      continue;
     }
-    cur += line + "\n";
-  }
-  if (cur.trim().length > 200) chunks.push(cur.trim());
 
-  return chunks.length ? chunks : [text.slice(0, maxChars)];
+    for (let i = 0; i < partMatches.length; i++) {
+      const start = partMatches[i].index ?? 0;
+      const end =
+        i + 1 < partMatches.length
+          ? (partMatches[i + 1].index ?? tc.body.length)
+          : tc.body.length;
+
+      const letter = partMatches[i][1].toLowerCase();
+      const piece = tc.body.slice(start, end).trim();
+
+      // Roman parts: "(i)", "(ii)" ...
+      const romanMatches = Array.from(
+        piece.matchAll(/(?:^|\n)\s*\(((?:iv|v?i{1,3}|ix|x))\)\s+/gi)
+      );
+
+      if (romanMatches.length === 0) {
+        finalChunks.push(`${tc.label}(${letter})\n${piece}`.trim());
+        continue;
+      }
+
+      for (let j = 0; j < romanMatches.length; j++) {
+        const rStart = romanMatches[j].index ?? 0;
+        const rEnd =
+          j + 1 < romanMatches.length
+            ? (romanMatches[j + 1].index ?? piece.length)
+            : piece.length;
+
+        const roman = romanMatches[j][1].toLowerCase();
+        const romanPiece = piece.slice(rStart, rEnd).trim();
+
+        finalChunks.push(`${tc.label}(${letter})(${roman})\n${romanPiece}`.trim());
+      }
+    }
+  }
+
+  // Keep only usable chunks
+  const usable = finalChunks
+    .map((c) => c.trim())
+    .filter((c) => c.replace(/\s/g, "").length > 180);
+
+  return usable.length ? usable : chunkByChars(cleaned, 2400);
 }
 
 /**
- * Minimal prompt contract
+ * Extract label from first line if we injected it.
  */
-function buildPrompts(tool: string, notes: string, options?: any, label?: string) {
-  const examType = String(options?.examType ?? "unspecified");
-  const profEmphasis = String(options?.profEmphasis ?? "unspecified");
-
-  const baseSystem = `
-You are an academic study assistant.
-
-Rules:
-- Treat all input as study material.
-- Never output planning or internal reasoning.
-- NEVER end mid-sentence or mid-bullet.
-- End with the exact line: ---END---
-`.trim();
-
-  if (tool === "Homework Explain") {
-    const developer = `
-TASK: Homework Explain
-
-Instructions:
-- First line MUST be: [${label ?? "Problem"}]
-- Output exactly these sections:
-  • What the problem is asking
-  • Method / steps to solve
-  • Common pitfalls
-- Each section must have at least 2 bullets.
-- High-level guidance only (no final numeric answers).
-- Use bullets.
-- End with ---END---.
-`.trim();
-
-    const user = `
-Exam type: ${examType}
-Professor emphasis: ${profEmphasis}
-
-PROBLEM TEXT:
-<<<BEGIN
-${notes}
-END>>>
-`.trim();
-
-    return { system: baseSystem, developer, user };
-  }
-
-  if (tool === "Formula Sheet") {
-    const developer = `
-TASK: Formula Sheet
-
-Instructions:
-- Output a formula sheet only.
-- Use 4–10 short sections with headers.
-- Bullets should be formulas/identities/definitions.
-- For each item: include variable meanings + when to use (one short line).
-- No practice problems.
-- End with ---END---.
-`.trim();
-
-    const user = `
-Exam type: ${examType}
-Professor emphasis: ${profEmphasis}
-
-STUDY MATERIAL:
-<<<BEGIN
-${notes}
-END>>>
-`.trim();
-
-    return { system: baseSystem, developer, user };
-  }
-
-  const developer = `
-TASK: Study Guide
-
-Instructions:
-Produce:
-1) Key formulas (brief)
-2) Core concepts (plain English)
-3) Step-by-step reasoning strategies
-4) Common mistakes
-5) 3–5 exam-style practice questions (NO solutions)
-
-- Bullet points.
-- Concise.
-- End with ---END---.
-`.trim();
-
-  const user = `
-Exam type: ${examType}
-Professor emphasis: ${profEmphasis}
-
-STUDY MATERIAL:
-<<<BEGIN
-${notes}
-END>>>
-`.trim();
-
-  return { system: baseSystem, developer, user };
+function extractProblemLabel(problemText: string) {
+  const firstLine = problemText.split("\n")[0]?.trim() ?? "";
+  const m = firstLine.match(/^(\d+(?:\([a-z]\))?(?:\([ivx]+\))?)/i);
+  return m ? m[1] : "Problem";
 }
 
 /**
- * IMPORTANT: do NOT fabricate ---END--- if model returned empty.
+ * Pick 2–4 anchor snippets from problem text so model can't be generic.
  */
+function pickAnchors(problemText: string) {
+  const raw = (problemText ?? "").replace(/\s+/g, " ").trim();
+
+  // Prefer equation-ish segments around "=" or "≜"
+  const eq = raw.match(/.{0,40}(?:=|≜).{0,60}/g) ?? [];
+  const anchors: string[] = [];
+
+  for (const s of eq) {
+    const t = s.trim();
+    if (t.length >= 20 && t.length <= 120) anchors.push(t);
+    if (anchors.length >= 3) break;
+  }
+
+  // If none, grab some distinctive phrases (first sentence-ish chunks)
+  if (anchors.length < 2) {
+    const fallback = raw
+      .split(/(?<=[.?!])\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 25 && s.length <= 120);
+    for (const s of fallback.slice(0, 3)) anchors.push(s);
+  }
+
+  // De-dupe and cap
+  return Array.from(new Set(anchors)).slice(0, 4);
+}
+
+/**
+ * Reject too-short / vague Homework Explain blocks.
+ */
+function looksTooShortHomeworkExplain(text: string) {
+  const body = (text ?? "").replace(/\s*---END---\s*$/g, "").trim();
+
+  const hasAsking = /What the problem is asking/i.test(body);
+  const hasMethod = /Method\s*\/\s*steps to solve/i.test(body);
+  const hasPitfalls = /Common pitfalls/i.test(body);
+
+  const bullets = (body.match(/^\s*[-•]\s+/gm) ?? []).length;
+  const longEnough = body.length >= 320;
+
+  return !(hasAsking && hasMethod && hasPitfalls && bullets >= 6 && longEnough);
+}
+
 function ensureEndMarker(text: string) {
   const t = (text ?? "").trim();
   if (!t) return "";
@@ -205,41 +214,16 @@ function ensureEndMarker(text: string) {
   return t + "\n---END---";
 }
 
-/**
- * Robustly pull text from Responses API output.
- * (Protects you if output_text is missing.)
- */
-function getOutputText(resp: any): string {
-  if (typeof resp?.output_text === "string") return resp.output_text;
-
-  // fallback: try to reconstruct from output array
-  const out = resp?.output;
-  if (Array.isArray(out)) {
-    let acc = "";
-    for (const item of out) {
-      const content = item?.content;
-      if (Array.isArray(content)) {
-        for (const c of content) {
-          if (typeof c?.text === "string") acc += c.text;
-        }
-      }
-    }
-    return acc;
-  }
-  return "";
-}
-
 function safeJoin(outputs: string[]) {
   const cleaned = outputs
     .map((o) => (o ?? "").replace(/\s*---END---\s*$/g, "").trimEnd())
-    .filter(Boolean);
+    .filter((o) => o.trim().length > 0);
 
-  const joined = cleaned.join("\n\n").trim();
-  return ensureEndMarker(joined);
+  return ensureEndMarker(cleaned.join("\n\n").trim());
 }
 
 /**
- * Read request (JSON or multipart)
+ * Read request (JSON or multipart/form-data).
  */
 async function readRequest(req: Request) {
   const contentType = req.headers.get("content-type") ?? "";
@@ -265,6 +249,7 @@ async function readRequest(req: Request) {
     return { tool, notes, options, pdfFile };
   }
 
+  // JSON safe parse
   let body: any = {};
   try {
     body = await req.json();
@@ -278,6 +263,53 @@ async function readRequest(req: Request) {
     options: body.options ?? {},
     pdfFile: null as any,
   };
+}
+
+function buildHomeworkExplainPrompts(problemText: string, options: any, label: string) {
+  const examType = String(options?.examType ?? "unspecified");
+  const profEmphasis = String(options?.profEmphasis ?? "unspecified");
+  const anchors = pickAnchors(problemText);
+
+  const system = `
+You are an academic study assistant.
+
+Rules:
+- Treat all input as study material.
+- Never output planning or internal reasoning.
+- NEVER end mid-sentence or mid-bullet.
+- End with the exact line: ---END---
+`.trim();
+
+  const developer = `
+TASK: Homework Explain
+
+Instructions:
+- First line MUST be: [${label}]
+- Output exactly these sections in this order:
+  • What the problem is asking
+  • Method / steps to solve
+  • Common pitfalls
+
+Hard requirements (IMPORTANT):
+- Each section must have at least 2 bullets.
+- You MUST explicitly reference at least TWO of these exact anchors (verbatim or near-verbatim):
+  ${anchors.map((a) => `- "${a}"`).join("\n  ")}
+- Do NOT be generic. Tie steps to the actual expressions/tasks shown.
+- High-level guidance only (no final numeric answers).
+- End with ---END---.
+`.trim();
+
+  const user = `
+Exam type: ${examType}
+Professor emphasis: ${profEmphasis}
+
+PROBLEM TEXT:
+<<<BEGIN
+${problemText}
+END>>>
+`.trim();
+
+  return { system, developer, user };
 }
 
 export async function POST(req: Request) {
@@ -294,49 +326,41 @@ export async function POST(req: Request) {
 
     let materialText = notes;
 
-    // PDF upload -> extract server side
     if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
       const ab = await (pdfFile as File).arrayBuffer();
       const buffer = Buffer.from(ab);
       const extracted = await extractPdfText(buffer);
-
       if (extracted) materialText = extracted;
-
-      if (!materialText || materialText.replace(/\s/g, "").length < 200) {
-        return Response.json(
-          {
-            error:
-              "I couldn't extract enough readable text from that PDF. Try another PDF or paste the text content.",
-          },
-          { status: 400 }
-        );
-      }
     }
 
     if (!materialText) {
+      return Response.json({ error: "Paste notes or upload a PDF first." }, { status: 400 });
+    }
+
+    if (materialText.replace(/\s/g, "").length < 200) {
       return Response.json(
-        { error: "Paste notes or upload a PDF first." },
+        {
+          error:
+            "Not enough readable text extracted. If scanned, use a text-based PDF or OCR then re-upload.",
+        },
         { status: 400 }
       );
     }
 
-    // Homework Explain = per-problem calls
+    // Homework Explain: per-problem
     if (tool === "Homework Explain") {
       const problems = splitIntoProblems(materialText);
 
-      const maxProblems = userIsPro ? 30 : 6;
-      const perProblemMaxOutputTokens = 450;
+      const maxProblems = userIsPro ? 30 : 8;
+      const perProblemMaxOutputTokens = 650;
 
       const outputs: string[] = [];
 
       for (const problemText of problems.slice(0, maxProblems)) {
-        if (!problemText || problemText.replace(/\s/g, "").length < 200) continue;
-
         const label = extractProblemLabel(problemText);
-        const { system, developer, user } = buildPrompts(tool, problemText, options, label);
+        const { system, developer, user } = buildHomeworkExplainPrompts(problemText, options, label);
 
-        // attempt 1
-        const resp1 = await client.responses.create({
+        const resp = await client.responses.create({
           model,
           input: [
             { role: "system", content: system },
@@ -346,11 +370,10 @@ export async function POST(req: Request) {
           max_output_tokens: perProblemMaxOutputTokens,
         });
 
-        let out = ensureEndMarker(getOutputText(resp1));
-        let bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
+        let out = ensureEndMarker((resp as any).output_text ?? "");
 
-        // retry once if empty-ish
-        if (bodyOnly.length < 160) {
+        // Retry once if too short
+        if (looksTooShortHomeworkExplain(out)) {
           const resp2 = await client.responses.create({
             model: "gpt-5-mini",
             input: [
@@ -361,65 +384,89 @@ export async function POST(req: Request) {
                   developer +
                   `
 
-CRITICAL:
-- Do NOT output only ---END---.
-- You MUST include all 3 sections with at least 2 bullets each.
-- If unclear, write generic but relevant steps for this type of EE problem.
+CRITICAL RETRY:
+- Expand each section to 3–5 bullets.
+- Explicitly mention the anchor expressions and describe the exact manipulation steps.
 `,
               },
               { role: "user", content: user },
             ],
             max_output_tokens: perProblemMaxOutputTokens,
           });
-
-          out = ensureEndMarker(getOutputText(resp2));
-          bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
+          out = ensureEndMarker((resp2 as any).output_text ?? out);
         }
 
-        // if STILL empty, skip it (don’t poison output with blanks)
-        if (bodyOnly.length >= 80) outputs.push(out);
+        if (!looksTooShortHomeworkExplain(out)) outputs.push(out);
       }
 
       if (!outputs.length) {
+        // Whole-doc salvage mode
+        const resp = await client.responses.create({
+          model: "gpt-5-mini",
+          input: [
+            { role: "system", content: "You are an academic study assistant. End with ---END---." },
+            {
+              role: "developer",
+              content: `
+TASK: Homework Explain (salvage)
+
+- Cover at least TWO distinct problems from the text.
+- Use the exact per-block format:
+
+[ProblemLabel]
+- What the problem is asking:
+  - ...
+  - ...
+- Method / steps to solve:
+  - ...
+  - ...
+- Common pitfalls:
+  - ...
+  - ...
+
+- No numeric final answers.
+- End with ---END---.
+`.trim(),
+            },
+            { role: "user", content: materialText.slice(0, 14000) },
+          ],
+          max_output_tokens: 1600,
+        });
+
+        const out = ensureEndMarker((resp as any).output_text ?? "");
+        if (out) return Response.json({ output: out });
+
         return Response.json(
-          {
-            error:
-              "I couldn't generate output from that text (chunks were empty/invalid). Try a clearer PDF or paste the problem text.",
-          },
-          { status: 400 }
+          { error: "Could not generate usable output from extracted text." },
+          { status: 500 }
         );
       }
 
       return Response.json({ output: safeJoin(outputs) });
     }
 
-    // single pass tools
-    const { system, developer, user } = buildPrompts(tool, materialText, options);
-
+    // Other tools: single pass
     const resp = await client.responses.create({
       model,
       input: [
-        { role: "system", content: system },
-        { role: "developer", content: developer },
-        { role: "user", content: user },
+        { role: "system", content: "You are an academic study assistant. End with ---END---." },
+        { role: "developer", content: `TASK: ${tool}. End with ---END---.` },
+        { role: "user", content: materialText },
       ],
-      max_output_tokens: tool === "Formula Sheet" ? 1600 : 1800,
+      max_output_tokens: 1800,
     });
 
-    const output = ensureEndMarker(getOutputText(resp));
-
+    const output = ensureEndMarker((resp as any).output_text ?? "");
     if (!output) {
-      return Response.json(
-        { error: "Model returned empty output. Try again or shorten the input." },
-        { status: 502 }
-      );
+      return Response.json({ error: "Model returned empty output." }, { status: 500 });
     }
 
     return Response.json({ output });
   } catch (err: any) {
-    return Response.json(
-      { error: err?.message ?? "Server error" },
-      { status: 500 }
-    );
+    return Response.json({ error: err?.message ?? "Server error" }, { status: 500 });
   }
+}
+
+export async function GET() {
+  return Response.json({ ok: true, route: "/api/aceprep" });
 }
