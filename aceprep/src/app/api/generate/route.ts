@@ -1,15 +1,19 @@
 // src/app/api/aceprep/route.ts
 import OpenAI from "openai";
-import * as pdfParseNS from "pdf-parse";
 import { Buffer } from "node:buffer";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic"; // ✅ avoid caching / edge weirdness
 
 /**
- * Extract text from PDF buffer (pdf-parse ESM/CJS safe import).
+ * Extract text from PDF buffer.
+ * Use dynamic import to avoid Turbopack build issues.
  */
 async function extractPdfText(buffer: Buffer) {
-  const pdfParse: any = (pdfParseNS as any).default ?? pdfParseNS;
+  // ✅ dynamic import prevents "export default doesn't exist" build errors
+  const pdfParseNS: any = await import("pdf-parse");
+  const pdfParse: any = pdfParseNS.default ?? pdfParseNS;
+
   const data = await pdfParse(buffer);
   return (data?.text ?? "").trim();
 }
@@ -42,7 +46,7 @@ function getClient() {
  */
 function modelForTool(tool: string) {
   if (tool === "Homework Explain") return "gpt-5-mini"; // reliability
-  return "gpt-5-nano"; // cheap for everything else
+  return "gpt-5-nano"; // cheap
 }
 
 /**
@@ -55,28 +59,22 @@ function splitIntoProblems(text: string) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  // Common patterns:
-  // 1
-  // 1.
-  // Problem 1
-  // 1(a)
-  // 3(b)(ii)
   const parts = cleaned.split(
     /\n(?=(?:Problem\s*)?\d+\s*(?:[\.\)]|\([a-z]\)|\([a-z]\)\([ivx]+\)|\([ivx]+\)))/i
   );
 
-  const units = parts.map((p) => p.trim()).filter((p) => p.length > 40);
+  // ✅ make this stricter so you don’t send junk chunks
+  const units = parts
+    .map((p) => p.trim())
+    .filter((p) => p.length > 140) // was 40; too small
+    .filter((p) => /[a-z0-9]/i.test(p));
 
-  // Fallback if split fails (single big blob)
-  if (units.length <= 1) {
-    return chunkByChars(cleaned, 2200);
-  }
-
+  if (units.length <= 1) return chunkByChars(cleaned, 2200);
   return units;
 }
 
 /**
- * Safe fallback chunker if problem splitting fails.
+ * Safe fallback chunker
  */
 function chunkByChars(text: string, maxChars = 2200) {
   const lines = text.split("\n");
@@ -85,25 +83,20 @@ function chunkByChars(text: string, maxChars = 2200) {
 
   for (const line of lines) {
     if ((cur + line + "\n").length > maxChars) {
-      if (cur.trim()) chunks.push(cur.trim());
+      if (cur.trim().length > 200) chunks.push(cur.trim()); // ✅ skip tiny chunks
       cur = "";
     }
     cur += line + "\n";
   }
-  if (cur.trim()) chunks.push(cur.trim());
+  if (cur.trim().length > 200) chunks.push(cur.trim());
 
-  return chunks;
+  return chunks.length ? chunks : [text.slice(0, maxChars)];
 }
 
 /**
- * Minimal prompt contract per tool.
+ * Minimal prompt contract
  */
-function buildPrompts(
-  tool: string,
-  notes: string,
-  options?: any,
-  label?: string
-) {
+function buildPrompts(tool: string, notes: string, options?: any, label?: string) {
   const examType = String(options?.examType ?? "unspecified");
   const profEmphasis = String(options?.profEmphasis ?? "unspecified");
 
@@ -123,7 +116,6 @@ TASK: Homework Explain
 
 Instructions:
 - First line MUST be: [${label ?? "Problem"}]
-- You will be given ONE problem chunk at a time.
 - Output exactly these sections:
   • What the problem is asking
   • Method / steps to solve
@@ -173,7 +165,6 @@ END>>>
     return { system: baseSystem, developer, user };
   }
 
-  // Default: Study Guide
   const developer = `
 TASK: Study Guide
 
@@ -217,9 +208,7 @@ function safeJoin(outputs: string[]) {
 }
 
 /**
- * Read either JSON or multipart/form-data.
- * - JSON: { tool, notes, options }
- * - FormData: tool, options (JSON string), notes (optional), pdf (File)
+ * Read request (JSON or multipart)
  */
 async function readRequest(req: Request) {
   const contentType = req.headers.get("content-type") ?? "";
@@ -245,7 +234,6 @@ async function readRequest(req: Request) {
     return { tool, notes, options, pdfFile };
   }
 
-  // JSON branch (safe parse)
   let body: any = {};
   try {
     body = await req.json();
@@ -253,10 +241,12 @@ async function readRequest(req: Request) {
     body = {};
   }
 
-  const tool = String(body.tool ?? "Study Guide");
-  const notes = String(body.notes ?? "").trim();
-  const options = body.options ?? {};
-  return { tool, notes, options, pdfFile: null as any };
+  return {
+    tool: String(body.tool ?? "Study Guide"),
+    notes: String(body.notes ?? "").trim(),
+    options: body.options ?? {},
+    pdfFile: null as any,
+  };
 }
 
 export async function POST(req: Request) {
@@ -271,16 +261,16 @@ export async function POST(req: Request) {
     const client = getClient();
     const model = modelForTool(tool);
 
-    // 1) Extract PDF text if uploaded
     let materialText = notes;
 
+    // PDF upload -> extract server side
     if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
       const ab = await (pdfFile as File).arrayBuffer();
       const buffer = Buffer.from(ab);
       const extracted = await extractPdfText(buffer);
+
       if (extracted) materialText = extracted;
 
-      // guard: too little text extracted
       if (!materialText || materialText.replace(/\s/g, "").length < 200) {
         return Response.json(
           {
@@ -299,7 +289,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2) Homework Explain: split -> per-problem calls
+    // Homework Explain = per-problem calls
     if (tool === "Homework Explain") {
       const problems = splitIntoProblems(materialText);
 
@@ -309,6 +299,9 @@ export async function POST(req: Request) {
       const outputs: string[] = [];
 
       for (const problemText of problems.slice(0, maxProblems)) {
+        // ✅ guard: skip junk chunks
+        if (!problemText || problemText.replace(/\s/g, "").length < 200) continue;
+
         const label = extractProblemLabel(problemText);
         const { system, developer, user } = buildPrompts(
           tool,
@@ -317,7 +310,6 @@ export async function POST(req: Request) {
           label
         );
 
-        // First attempt (mini)
         const resp = await client.responses.create({
           model,
           input: [
@@ -331,8 +323,8 @@ export async function POST(req: Request) {
         let out = ensureEndMarker((resp as any).output_text ?? "");
         const bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
 
-        // If model returned basically nothing, retry once with stricter instruction
-        if (bodyOnly.length < 120) {
+        // retry once if empty-ish
+        if (bodyOnly.length < 160) {
           const resp2 = await client.responses.create({
             model: "gpt-5-mini",
             input: [
@@ -346,24 +338,32 @@ export async function POST(req: Request) {
 CRITICAL:
 - Do NOT output only ---END---.
 - You MUST include all 3 sections with at least 2 bullets each.
-- If the chunk is unclear, still write generic but relevant steps for this type of problem.
+- If unclear, write generic but relevant steps for this type of EE problem.
 `,
               },
               { role: "user", content: user },
             ],
             max_output_tokens: perProblemMaxOutputTokens,
           });
+
           out = ensureEndMarker((resp2 as any).output_text ?? out);
         }
 
         outputs.push(out);
       }
 
-      const combined = safeJoin(outputs);
-      return Response.json({ output: combined });
+      // ✅ If we somehow got nothing, return a real error instead of blank
+      if (!outputs.length) {
+        return Response.json(
+          { error: "Could not detect any problems in the text. Try a clearer PDF or paste the text." },
+          { status: 400 }
+        );
+      }
+
+      return Response.json({ output: safeJoin(outputs) });
     }
 
-    // 3) Other tools: single pass
+    // single pass tools
     const { system, developer, user } = buildPrompts(tool, materialText, options);
 
     const resp = await client.responses.create({
@@ -376,8 +376,7 @@ CRITICAL:
       max_output_tokens: tool === "Formula Sheet" ? 1600 : 1800,
     });
 
-    const output = ensureEndMarker((resp as any).output_text ?? "");
-    return Response.json({ output });
+    return Response.json({ output: ensureEndMarker((resp as any).output_text ?? "") });
   } catch (err: any) {
     return Response.json(
       { error: err?.message ?? "Server error" },

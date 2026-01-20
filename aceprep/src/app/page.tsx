@@ -1,9 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { safePostJSON } from "@/lib/api";
+
 
 const adDurationMs = 15000; // 15s ad
-const DAILY_FREE_LIMIT = 100;
+const DAILY_FREE_LIMIT = 5; // <-- change here
 
 type ToolName =
   | "Study Guide"
@@ -12,11 +14,15 @@ type ToolName =
   | "Homework Explain"
   | "Essay Outline";
 
+
+
 export default function Home() {
   const [tool, setTool] = useState<ToolName>("Study Guide");
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isWatchingAd, setIsWatchingAd] = useState(false);
-  const [adSecondsLeft, setAdSecondsLeft] = useState<number>(Math.ceil(adDurationMs / 1000));
+  const [adSecondsLeft, setAdSecondsLeft] = useState<number>(
+    Math.ceil(adDurationMs / 1000)
+  );
 
   const [notes, setNotes] = useState("");
   const [examType, setExamType] = useState("");
@@ -26,7 +32,7 @@ export default function Home() {
   const [output, setOutput] = useState("Generated content will appear here.");
   const [error, setError] = useState<string | null>(null);
 
-  // ✅ PDF UI + hidden extracted text
+  // ✅ PDF UI + hidden extracted text (still client-side for now)
   const [pdfFileName, setPdfFileName] = useState<string | null>(null);
   const [pdfText, setPdfText] = useState<string>("");
 
@@ -58,7 +64,9 @@ export default function Home() {
     const used = Number(localStorage.getItem(key) ?? 0);
 
     if (used >= DAILY_FREE_LIMIT) {
-      setError("Daily free limit reached (5/day). Try again tomorrow or go Pro.");
+      setError(
+        `Daily free limit reached (${DAILY_FREE_LIMIT}/day). Try again tomorrow or go Pro.`
+      );
       return false;
     }
     localStorage.setItem(key, String(used + 1));
@@ -84,7 +92,10 @@ export default function Home() {
     const start = Date.now();
     const timer = setInterval(() => {
       const elapsed = Date.now() - start;
-      const remaining = Math.max(0, Math.ceil((adDurationMs - elapsed) / 1000));
+      const remaining = Math.max(
+        0,
+        Math.ceil((adDurationMs - elapsed) / 1000)
+      );
       setAdSecondsLeft(remaining);
 
       if (elapsed >= adDurationMs) {
@@ -107,20 +118,14 @@ export default function Home() {
           ? `PDF TEXT (${pdfFileName ?? "uploaded.pdf"}):\n${pdfText.trim()}`
           : "");
 
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tool,
-          notes: combinedNotes,
-          options: { examType, profEmphasis },
-        }),
-      });
+      const data = await safePostJSON("/api/aceprep", {
+  tool,
+  notes: combinedNotes,
+  options: { examType, profEmphasis },
+});
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error ?? "Generation failed.");
+setOutput(data.output ?? "No output returned.");
 
-      setOutput(data.output ?? "No output returned.");
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
       setOutput("Generated content will appear here.");
@@ -134,10 +139,7 @@ export default function Home() {
     setPdfFileName(file.name);
 
     try {
-      // Browser-only import (avoids DOMMatrix SSR issues)
       const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-
-      // ✅ Use local worker you copied into /public
       (pdfjsLib as any).GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
 
       const buffer = await file.arrayBuffer();
@@ -152,7 +154,13 @@ export default function Home() {
         text += (content.items as any[]).map((it) => it.str).join(" ") + "\n";
       }
 
-      setPdfText(text.slice(0, 30000)); // hidden, sent to API
+      const clipped = text.slice(0, 30000).trim();
+      if (!clipped || clipped.replace(/\s/g, "").length < 200) {
+        setError(
+          "Couldn’t extract enough readable text from that PDF. Try another PDF or paste the text."
+        );
+      }
+      setPdfText(clipped);
     } catch (e: any) {
       console.error(e);
       setPdfFileName(null);
@@ -179,135 +187,134 @@ export default function Home() {
       </header>
 
       {/* MAIN LAYOUT (with side ads) */}
-<div className="mx-auto grid max-w-7xl grid-cols-12 gap-4 px-4 py-6">
-  {/* LEFT ADS */}
-  <aside className="col-span-12 hidden md:col-span-3 md:block">
-    <div className="sticky top-24 rounded-xl border bg-white p-4">
-      <p className="mb-2 text-sm font-medium text-zinc-600">Sponsored</p>
-      <div className="h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
-        Ad slot (left)
-      </div>
-      <div className="mt-3 h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
-        Ad slot (left 2)
-      </div>
-    </div>
-  </aside>
-
-  {/* CENTER */}
-  <main className="col-span-12 md:col-span-6">
-    <div className="rounded-xl border bg-white p-6 shadow-sm">
-      {/* ---- EVERYTHING YOU CURRENTLY HAVE INSIDE max-w-3xl GOES HERE ---- */}
-      {/* DOCUMENT TYPE */}
-      <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
-        <label className="mb-2 block text-sm font-medium">Document type</label>
-
-        <div className="grid grid-cols-2 gap-2">
-          {["Study Guide", "Formula Sheet", "Homework Explain", "Essay Outline"].map((t) => (
-            <button
-              key={t}
-              onClick={() => setTool(t as ToolName)}
-              className={`rounded-md border px-3 py-2 text-sm ${
-                tool === t ? "bg-black text-white" : "bg-white"
-              }`}
-            >
-              {t}
-            </button>
-          ))}
-
-          <button
-            disabled
-            className="rounded-md border px-3 py-2 text-sm bg-white opacity-50 cursor-not-allowed"
-            title="Pro only"
-          >
-            Exam Pack 🔒
-          </button>
-        </div>
-
-        <p className="mt-2 text-xs text-zinc-500">{toolDescription}</p>
-      </div>
-
-      {/* NOTES + PDF */}
-      <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
-        <label className="mb-2 block text-sm font-medium">
-          Paste notes (PDF text is hidden)
-        </label>
-
-        <textarea
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          placeholder="Paste notes here…"
-          className="h-32 w-full resize-none rounded-md border px-3 py-2 text-sm"
-        />
-
-        <div className="mt-3 flex items-center gap-3">
-          <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm hover:bg-zinc-50">
-            <span className="text-base font-semibold">＋</span>
-            <span>Add PDF</span>
-            <input
-              type="file"
-              accept="application/pdf"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handlePdfUpload(f);
-                e.currentTarget.value = "";
-              }}
-            />
-          </label>
-
-          {pdfFileName && (
-            <div className="flex items-center gap-2 rounded-full border bg-white px-3 py-1.5 text-sm">
-              <span className="max-w-[220px] truncate">{pdfFileName}</span>
-              <button
-                type="button"
-                onClick={removePdf}
-                className="rounded-full px-2 py-0.5 text-zinc-600 hover:bg-zinc-100"
-                aria-label="Remove PDF"
-              >
-                ✕
-              </button>
+      <div className="mx-auto grid max-w-7xl grid-cols-12 gap-4 px-4 py-6">
+        {/* LEFT ADS */}
+        <aside className="col-span-12 hidden md:col-span-3 md:block">
+          <div className="sticky top-24 rounded-xl border bg-white p-4">
+            <p className="mb-2 text-sm font-medium text-zinc-600">Sponsored</p>
+            <div className="h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
+              Ad slot (left)
             </div>
-          )}
+            <div className="mt-3 h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
+              Ad slot (left 2)
+            </div>
+          </div>
+        </aside>
 
-          {pdfFileName && (
-            <span className="text-xs text-zinc-500">
-              PDF uploaded (text will be included automatically)
-            </span>
-          )}
-        </div>
+        {/* CENTER */}
+        <main className="col-span-12 md:col-span-6">
+          <div className="rounded-xl border bg-white p-6 shadow-sm">
+            {/* DOCUMENT TYPE */}
+            <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
+              <label className="mb-2 block text-sm font-medium">Document type</label>
+
+              <div className="grid grid-cols-2 gap-2">
+                {["Study Guide", "Formula Sheet", "Homework Explain", "Essay Outline"].map(
+                  (t) => (
+                    <button
+                      key={t}
+                      onClick={() => setTool(t as ToolName)}
+                      className={`rounded-md border px-3 py-2 text-sm ${
+                        tool === t ? "bg-black text-white" : "bg-white"
+                      }`}
+                    >
+                      {t}
+                    </button>
+                  )
+                )}
+
+                <button
+                  disabled
+                  className="rounded-md border px-3 py-2 text-sm bg-white opacity-50 cursor-not-allowed"
+                  title="Pro only"
+                >
+                  Exam Pack 🔒
+                </button>
+              </div>
+
+              <p className="mt-2 text-xs text-zinc-500">{toolDescription}</p>
+            </div>
+
+            {/* NOTES + PDF */}
+            <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
+              <label className="mb-2 block text-sm font-medium">
+                Paste notes (PDF text is hidden)
+              </label>
+
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Paste notes here…"
+                className="h-32 w-full resize-none rounded-md border px-3 py-2 text-sm"
+              />
+
+              <div className="mt-3 flex items-center gap-3">
+                <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm hover:bg-zinc-50">
+                  <span className="text-base font-semibold">＋</span>
+                  <span>Add PDF</span>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) handlePdfUpload(f);
+                      e.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+
+                {pdfFileName && (
+                  <div className="flex items-center gap-2 rounded-full border bg-white px-3 py-1.5 text-sm">
+                    <span className="max-w-[220px] truncate">{pdfFileName}</span>
+                    <button
+                      type="button"
+                      onClick={removePdf}
+                      className="rounded-full px-2 py-0.5 text-zinc-600 hover:bg-zinc-100"
+                      aria-label="Remove PDF"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {pdfFileName && (
+                  <span className="text-xs text-zinc-500">
+                    PDF uploaded (text will be included automatically)
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <button
+              onClick={onGenerateClick}
+              disabled={loading}
+              className="w-full rounded-lg bg-black py-3 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {loading ? "Generating…" : "Generate ▶"}
+            </button>
+
+            {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+
+            <pre className="mt-4 h-64 overflow-auto rounded-md border bg-white p-3 text-sm">
+              {output}
+            </pre>
+          </div>
+        </main>
+
+        {/* RIGHT ADS */}
+        <aside className="col-span-12 hidden md:col-span-3 md:block">
+          <div className="sticky top-24 rounded-xl border bg-white p-4">
+            <p className="mb-2 text-sm font-medium text-zinc-600">Ads</p>
+            <div className="h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
+              Ad slot (right)
+            </div>
+            <div className="mt-3 h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
+              Ad slot (right 2)
+            </div>
+          </div>
+        </aside>
       </div>
-
-      <button
-        onClick={onGenerateClick}
-        disabled={loading}
-        className="w-full rounded-lg bg-black py-3 text-sm font-medium text-white disabled:opacity-50"
-      >
-        {loading ? "Generating…" : "Generate ▶"}
-      </button>
-
-      {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-
-      <pre className="mt-4 h-64 overflow-auto rounded-md border bg-white p-3 text-sm">
-        {output}
-      </pre>
-      {/* ---- END CENTER CONTENT ---- */}
-    </div>
-  </main>
-
-  {/* RIGHT ADS */}
-  <aside className="col-span-12 hidden md:col-span-3 md:block">
-    <div className="sticky top-24 rounded-xl border bg-white p-4">
-      <p className="mb-2 text-sm font-medium text-zinc-600">Ads</p>
-      <div className="h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
-        Ad slot (right)
-      </div>
-      <div className="mt-3 h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
-        Ad slot (right 2)
-      </div>
-    </div>
-  </aside>
-</div>
-
 
       {/* AD MODAL */}
       {isModalOpen && (
@@ -315,7 +322,9 @@ export default function Home() {
           <div className="bg-white p-5 rounded-xl w-full max-w-md">
             <p className="font-semibold mb-2">Watch a short ad</p>
             <div className="h-24 border mb-2 bg-zinc-50" />
-            {isWatchingAd && <p className="text-sm">Ad ends in {adSecondsLeft}s…</p>}
+            {isWatchingAd && (
+              <p className="text-sm">Ad ends in {adSecondsLeft}s…</p>
+            )}
 
             <div className="mt-3 flex gap-2">
               <button
@@ -330,7 +339,9 @@ export default function Home() {
                 disabled={isWatchingAd}
                 className="flex-1 bg-black text-white py-2 rounded-lg text-sm disabled:opacity-50"
               >
-                {isWatchingAd ? "Watching…" : `Watch Ad (${Math.ceil(adDurationMs / 1000)}s)`}
+                {isWatchingAd
+                  ? "Watching…"
+                  : `Watch Ad (${Math.ceil(adDurationMs / 1000)}s)`}
               </button>
             </div>
           </div>
