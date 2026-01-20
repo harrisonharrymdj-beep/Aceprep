@@ -5,7 +5,7 @@ import { safePostJSON } from "@/lib/api";
 
 
 const adDurationMs = 15000; // 15s ad
-const DAILY_FREE_LIMIT = 5; // <-- change here
+const DAILY_FREE_LIMIT = 10; // <-- change here
 
 type ToolName =
   | "Study Guide"
