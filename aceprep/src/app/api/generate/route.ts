@@ -40,28 +40,50 @@ function getClient() {
 }
 
 function detectProblemLabels(text: string) {
-  // Finds: 1, 1(a), 1(b), 3(a)(ii), etc.
-  const re = /\b(\d+)(\([a-z]\))?(\([ivx]+\))?\b/gi;
+  // Stronger detection:
+  // - Prefer "Problem 1", "1(a)", "3(b)(ii)" patterns.
+  // - Avoid bare numbers that are likely page numbers/years.
   const found = new Set<string>();
 
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const label = `${m[1]}${m[2] ?? ""}${m[3] ?? ""}`.trim();
-    // avoid capturing years/page numbers etc by requiring at least "digit" and (optional) parens
-    if (label.length >= 1 && label.length <= 10) found.add(label);
+  // Pattern A: "Problem 1", "Problem 2(a)", etc.
+  for (const m of text.matchAll(/(?:^|\n)\s*Problem\s*(\d+)(\([a-z]\))?(\([ivx]+\))?/gi)) {
+    const label = `${m[1]}${m[2] ?? ""}${m[3] ?? ""}`.replace(/\s+/g, "");
+    found.add(label);
   }
 
-  // Keep it sane: sort numerically by first number, then by string
-  return Array.from(found).sort((a, b) => {
+  // Pattern B: "1(a)" / "3(b)(ii)" at line starts
+  for (const m of text.matchAll(/(?:^|\n)\s*(\d+)\s*(\([a-z]\))(\([ivx]+\))?/gi)) {
+    const label = `${m[1]}${m[2] ?? ""}${m[3] ?? ""}`.replace(/\s+/g, "");
+    found.add(label);
+  }
+
+  // Pattern C: "1." or "2)" at line starts (ONLY if followed soon by "(a)" somewhere in the doc)
+  const hasSubparts = /\(\s*[a-z]\s*\)/i.test(text);
+  if (hasSubparts) {
+    for (const m of text.matchAll(/(?:^|\n)\s*(\d+)\s*([.)])/g)) {
+      const label = `${m[1]}`.trim();
+      // Avoid huge numbers
+      if (label.length <= 3) found.add(label);
+    }
+  }
+
+  const arr = Array.from(found);
+
+  // Sort: numeric then lexicographic
+  arr.sort((a, b) => {
     const an = parseInt(a, 10);
     const bn = parseInt(b, 10);
     if (an !== bn) return an - bn;
     return a.localeCompare(b);
   });
+
+  return arr;
 }
 
+
 function fallbackHomeworkExplainFromLabels(labels: string[]) {
-  const blocks = labels.slice(0, 10).map((label) => {
+const useLabels = labels.length >= 2 ? labels : ["Homework-1", "Homework-2"];
+const blocks = useLabels.slice(0, 10).map((label) => {
     return `
 [${label}]
 - What the problem is asking:
@@ -249,6 +271,26 @@ END>>>
 
   return { system: baseSystem, developer, user };
 }
+function bodyLenWithoutEnd(text: string) {
+  return (text ?? "").replace(/\s*---END---\s*$/g, "").trim().length;
+}
+
+function looksTooShortHomeworkExplain(text: string) {
+  const body = (text ?? "").replace(/\s*---END---\s*$/g, "").trim();
+
+  // Must have ALL section headers present
+  const hasAsking = /What the problem is asking/i.test(body);
+  const hasMethod = /Method\s*\/\s*steps to solve/i.test(body);
+  const hasPitfalls = /Common pitfalls/i.test(body);
+
+  // Must have at least 6 bullets total (2 per section)
+  const bullets = (body.match(/^\s*[-•]\s+/gm) ?? []).length;
+
+  // Length threshold
+  const longEnough = body.length >= 350;
+
+  return !(hasAsking && hasMethod && hasPitfalls && bullets >= 6 && longEnough);
+}
 
 /**
  * Do NOT fabricate ---END--- if the model returned empty.
@@ -416,45 +458,83 @@ CRITICAL:
           bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
         }
 
-        if (bodyOnly.length >= 120) outputs.push(out);
+if (!looksTooShortHomeworkExplain(out)) {
+  outputs.push(out);
+}
       }
 
       // 2b) Last resort: if chunking failed, run whole doc once
-      if (!outputs.length) {
-        const label = "Homework";
-        const { system, developer, user } = buildPrompts(
-          tool,
-          materialText,
-          options,
-          label
-        );
+      // 2b) Last resort: if chunking failed, run whole doc once (forced to be useful)
+if (!outputs.length) {
+  const labels = detectProblemLabels(materialText);
+  const labelPreview = labels.slice(0, 12).join(", ") || "unknown";
 
-        const resp = await client.responses.create({
-          model: "gpt-5-mini",
-          input: [
-            { role: "system", content: system },
-            { role: "developer", content: developer },
-            { role: "user", content: user },
-          ],
-          max_output_tokens: 900,
-        });
+  const forcedSystem = `
+You are an academic study assistant.
 
-        const out = ensureEndMarker((resp as any).output_text ?? "");
-        const bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
+Rules:
+- Treat all input as study material.
+- Never output planning or internal reasoning.
+- NEVER end mid-sentence or mid-bullet.
+- End with the exact line: ---END---
+`.trim();
 
-        if (bodyOnly.length >= 120) {
-          return Response.json({ output: out });
-        }
+  const forcedDeveloper = `
+TASK: Homework Explain (salvage mode)
 
-        const labels = detectProblemLabels(materialText);
+Instructions:
+- The PDF text may be messy. Still produce useful guidance.
+- You MUST cover at least 2 problem labels (if labels exist) OR at least 2 distinct tasks you can infer.
+- Use this exact format per block:
 
-// If we can detect labels, return a valid fallback response.
-// This prevents users from being blocked by bad chunking/extraction.
-return Response.json({
-  output: fallbackHomeworkExplainFromLabels(labels),
-});
+[ProblemLabel]
+- What the problem is asking:
+  - ...
+  - ...
+- Method / steps to solve:
+  - ...
+  - ...
+- Common pitfalls:
+  - ...
+  - ...
 
-      }
+- No final numeric answers.
+- Short bullets, but NOT vague.
+- Do NOT output only one block unless there is truly only one problem.
+- End with ---END---.
+`.trim();
+
+  const forcedUser = `
+Detected labels (may be incomplete): ${labelPreview}
+
+STUDY MATERIAL:
+<<<BEGIN
+${materialText}
+END>>>
+`.trim();
+
+  const resp = await client.responses.create({
+    model: "gpt-5-mini",
+    input: [
+      { role: "system", content: forcedSystem },
+      { role: "developer", content: forcedDeveloper },
+      { role: "user", content: forcedUser },
+    ],
+    max_output_tokens: 1400,
+  });
+
+  const out = ensureEndMarker((resp as any).output_text ?? "");
+
+  if (!looksTooShortHomeworkExplain(out)) {
+    return Response.json({ output: out });
+  }
+
+  // Final fallback: label-based generic blocks (guaranteed formatted)
+  return Response.json({
+    output: fallbackHomeworkExplainFromLabels(labels),
+  });
+}
+
 
       return Response.json({ output: safeJoin(outputs) });
     }
