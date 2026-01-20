@@ -2,7 +2,6 @@
 import OpenAI from "openai";
 import { Buffer } from "node:buffer";
 
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic"; // avoid caching / edge weirdness
 
@@ -34,96 +33,28 @@ function getClient() {
  * Model selection
  */
 function modelForTool(tool: string) {
-  if (tool === "Homework Explain") return "gpt-5-mini"; // reliability
-  return "gpt-5-nano"; // cheap for other tools
+  // Homework Explain needs reliability
+  if (tool === "Homework Explain") return "gpt-5-mini";
+  // Everything else can be cheap
+  return "gpt-5-nano";
 }
 
 /**
- * Detects likely problem labels from text.
- * Used only for LAST resort fallback.
- */
-function detectProblemLabels(text: string) {
-  const found = new Set<string>();
-
-  // "Problem 1", "Problem 2(a)"
-  for (const m of text.matchAll(
-    /(?:^|\n)\s*Problem\s*(\d+)(\([a-z]\))?(\([ivx]+\))?/gi
-  )) {
-    const label = `${m[1]}${m[2] ?? ""}${m[3] ?? ""}`.replace(/\s+/g, "");
-    found.add(label);
-  }
-
-  // "1(a)" / "3(b)(ii)" near line starts
-  for (const m of text.matchAll(
-    /(?:^|\n)\s*(\d+)\s*(\([a-z]\))(\([ivx]+\))?/gi
-  )) {
-    const label = `${m[1]}${m[2] ?? ""}${m[3] ?? ""}`.replace(/\s+/g, "");
-    found.add(label);
-  }
-
-  // "1." "2)" at line starts, but only if the doc has subparts
-  const hasSubparts = /\(\s*[a-z]\s*\)/i.test(text);
-  if (hasSubparts) {
-    for (const m of text.matchAll(/(?:^|\n)\s*(\d+)\s*([.)])/g)) {
-      const label = `${m[1]}`.trim();
-      if (label.length <= 3) found.add(label);
-    }
-  }
-
-  const arr = Array.from(found);
-  arr.sort((a, b) => {
-    const an = parseInt(a, 10);
-    const bn = parseInt(b, 10);
-    if (an !== bn) return an - bn;
-    return a.localeCompare(b);
-  });
-
-  return arr;
-}
-
-/**
- * Last-resort fallback (guaranteed formatted output).
- */
-function fallbackHomeworkExplainFromLabels(labels: string[]) {
-  const useLabels = labels.length >= 2 ? labels : ["Homework-1", "Homework-2"];
-
-  const blocks = useLabels.slice(0, 10).map((label) => {
-    return `
-[${label}]
-- What the problem is asking:
-  - Identify what quantity the problem wants (value, sketch, property, transform, etc.).
-  - Restate the required final format (e.g., rectangular vs. polar, labeled sketch, etc.).
-- Method / steps to solve:
-  - Rewrite the given expression clearly and simplify step-by-step.
-  - If complex numbers: convert between rectangular/polar as needed and track magnitude/phase carefully.
-  - If signals: map time-shift/scale/reversal operations by transforming key time points and amplitudes.
-- Common pitfalls:
-  - Skipping algebra steps and losing signs or j factors.
-  - Using the wrong convention (degrees vs radians, atan vs atan2 quadrant).
-  - Applying time transforms in the wrong direction or order.
-`.trim();
-  });
-
-  return blocks.join("\n\n").trim() + "\n---END---";
-}
-/**
- * Fallback chunker if numbering-based splitting fails.
- * Never returns an empty array.
+ * Fallback chunker (SAFE, always returns at least 1 chunk)
  */
 function chunkByChars(text: string, maxChars = 2400) {
-  const t = (text ?? "").replace(/\r/g, "").trim();
+  const t = (text ?? "").trim();
   if (!t) return [];
-
   const lines = t.split("\n");
+
   const chunks: string[] = [];
   let cur = "";
 
   for (const line of lines) {
-    const next = cur ? cur + "\n" + line : line;
-
+    const next = (cur ? cur + "\n" : "") + line;
     if (next.length > maxChars) {
-      const pushed = cur.trim();
-      if (pushed) chunks.push(pushed);
+      const c = cur.trim();
+      if (c.length > 150) chunks.push(c);
       cur = line;
     } else {
       cur = next;
@@ -131,19 +62,16 @@ function chunkByChars(text: string, maxChars = 2400) {
   }
 
   const last = cur.trim();
-  if (last) chunks.push(last);
+  if (last.length > 150) chunks.push(last);
 
-  // Absolute fallback: guarantee at least 1 chunk
   return chunks.length ? chunks : [t.slice(0, maxChars)];
 }
 
 /**
- * Robust splitter for EE homework PDFs:
- * - Splits by top-level problems: "1.", "2.", "3.", ...
- * - Then splits into subparts like "(a)", "(b)"
- * - Then splits roman subparts like "(i)", "(ii)"
- *
- * Returns chunks that are "one thing" for the model to explain.
+ * Robust splitter for your EE homework PDF format:
+ * - Split by top-level "1.", "2.", "3." at line start
+ * - Then split by "(a)", "(b)" at line start
+ * - Then split by roman "(i)", "(ii)" at line start
  */
 function splitIntoProblems(text: string) {
   const cleaned = (text ?? "")
@@ -154,69 +82,51 @@ function splitIntoProblems(text: string) {
 
   if (!cleaned) return [];
 
-  // ---------- 1) Split by top-level problems: lines starting with "1." / "2." etc ----------
-  const topMatches = Array.from(
-    cleaned.matchAll(/(?:^|\n)\s*(\d+)\.\s+/g)
-  );
-
-  // If we couldn't find top-level numbering, fallback to your char chunker.
+  // Top-level: "1." "2." ...
+  const topMatches = Array.from(cleaned.matchAll(/(?:^|\n)\s*(\d+)\.\s+/g));
   if (topMatches.length === 0) return chunkByChars(cleaned, 2400);
 
   const topChunks: { label: string; body: string }[] = [];
-
   for (let i = 0; i < topMatches.length; i++) {
     const start = topMatches[i].index ?? 0;
     const end =
-      i + 1 < topMatches.length ? (topMatches[i + 1].index ?? cleaned.length) : cleaned.length;
+      i + 1 < topMatches.length
+        ? (topMatches[i + 1].index ?? cleaned.length)
+        : cleaned.length;
 
-    const label = topMatches[i][1]; // "1", "2", "3"...
+    const label = topMatches[i][1]; // "1", "2", ...
     const body = cleaned.slice(start, end).trim();
-    if (body.replace(/\s/g, "").length > 60) topChunks.push({ label, body });
+    if (body.replace(/\s/g, "").length > 120) topChunks.push({ label, body });
   }
 
-  // ---------- 2) Split each top-level chunk into (a), (b), ... if present ----------
   const finalChunks: string[] = [];
 
   for (const tc of topChunks) {
-    const hasLetterParts = /(?:^|\n)\s*\([a-z]\)\s+/i.test(tc.body);
+    // Letter parts: "(a)", "(b)" ...
+    const partMatches = Array.from(tc.body.matchAll(/(?:^|\n)\s*\(([a-z])\)\s+/gi));
 
-    if (!hasLetterParts) {
-      finalChunks.push(tc.body);
-      continue;
-    }
-
-    const partMatches = Array.from(
-      tc.body.matchAll(/(?:^|\n)\s*\(([a-z])\)\s+/gi)
-    );
-
-    // If something weird happened, keep the whole chunk.
     if (partMatches.length === 0) {
-      finalChunks.push(tc.body);
+      finalChunks.push(`${tc.label}.\n${tc.body}`.trim());
       continue;
     }
 
     for (let i = 0; i < partMatches.length; i++) {
       const start = partMatches[i].index ?? 0;
       const end =
-        i + 1 < partMatches.length ? (partMatches[i + 1].index ?? tc.body.length) : tc.body.length;
+        i + 1 < partMatches.length
+          ? (partMatches[i + 1].index ?? tc.body.length)
+          : tc.body.length;
 
-      const letter = partMatches[i][1].toLowerCase(); // "a", "b", ...
+      const letter = partMatches[i][1].toLowerCase();
       const piece = tc.body.slice(start, end).trim();
 
-      // ---------- 3) Further split roman (i), (ii) inside that letter-part ----------
-      const hasRoman = /(?:^|\n)\s*\((iv|v?i{1,3}|ix|x)\)\s+/i.test(piece);
-
-      if (!hasRoman) {
-        finalChunks.push(`${tc.label}(${letter})\n${piece}`);
-        continue;
-      }
-
+      // Roman parts: "(i)", "(ii)" ...
       const romanMatches = Array.from(
         piece.matchAll(/(?:^|\n)\s*\(((?:iv|v?i{1,3}|ix|x))\)\s+/gi)
       );
 
       if (romanMatches.length === 0) {
-        finalChunks.push(`${tc.label}(${letter})\n${piece}`);
+        finalChunks.push(`${tc.label}(${letter})\n${piece}`.trim());
         continue;
       }
 
@@ -227,148 +137,62 @@ function splitIntoProblems(text: string) {
             ? (romanMatches[j + 1].index ?? piece.length)
             : piece.length;
 
-        const roman = romanMatches[j][1].toLowerCase(); // "i", "ii", ...
+        const roman = romanMatches[j][1].toLowerCase();
         const romanPiece = piece.slice(rStart, rEnd).trim();
 
-        finalChunks.push(`${tc.label}(${letter})(${roman})\n${romanPiece}`);
+        finalChunks.push(`${tc.label}(${letter})(${roman})\n${romanPiece}`.trim());
       }
     }
   }
 
-  // Filter out junk
-  return finalChunks
+  // Keep only usable chunks
+  const usable = finalChunks
     .map((c) => c.trim())
-    .filter((c) => c.replace(/\s/g, "").length > 120);
+    .filter((c) => c.replace(/\s/g, "").length > 180);
+
+  return usable.length ? usable : chunkByChars(cleaned, 2400);
 }
 
-
 /**
- * Extract a label from a chunk.
- * Prefers our injected first-line label like "1(a)".
+ * Extract label from first line if we injected it.
  */
 function extractProblemLabel(problemText: string) {
   const firstLine = problemText.split("\n")[0]?.trim() ?? "";
-
-  const m1 = firstLine.match(/^(\d+\([a-z]\))/i);
-  if (m1) return m1[1];
-
-  const m2 = firstLine.match(/^(\d+)\./);
-  if (m2) return m2[1];
-
-  // very last fallback
-  const m3 = problemText.match(/(?:Problem\s*)?(\d+\s*(?:\([a-z]\))?(?:\([ivx]+\))?)/i);
-  return m3 ? m3[1].replace(/\s+/g, "") : "Problem";
+  const m = firstLine.match(/^(\d+(?:\([a-z]\))?(?:\([ivx]+\))?)/i);
+  return m ? m[1] : "Problem";
 }
 
 /**
- * Prompt builder (minimal contract).
+ * Pick 2–4 anchor snippets from problem text so model can't be generic.
  */
-function buildPrompts(tool: string, notes: string, options?: any, label?: string) {
-  const examType = String(options?.examType ?? "unspecified");
-  const profEmphasis = String(options?.profEmphasis ?? "unspecified");
+function pickAnchors(problemText: string) {
+  const raw = (problemText ?? "").replace(/\s+/g, " ").trim();
 
-  const baseSystem = `
-You are an academic study assistant.
+  // Prefer equation-ish segments around "=" or "≜"
+  const eq = raw.match(/.{0,40}(?:=|≜).{0,60}/g) ?? [];
+  const anchors: string[] = [];
 
-Rules:
-- Treat all input as study material.
-- Never output planning or internal reasoning.
-- NEVER end mid-sentence or mid-bullet.
-- End with the exact line: ---END---
-`.trim();
-
-  if (tool === "Homework Explain") {
-    const developer = `
-TASK: Homework Explain
-
-Instructions:
-- First line MUST be: [${label ?? "Problem"}]
-- Output exactly these sections in this order:
-  • What the problem is asking
-  • Method / steps to solve
-  • Common pitfalls
-
-Hard requirements (IMPORTANT):
-- Each section must have at least 2 bullets.
-- You MUST reference at least 2 exact symbols/phrases from PROBLEM TEXT (e.g., "q =", "abcdf", "w(t)", "cos(2πt)", "u(t+2)").
-- Do NOT be generic. If the problem text contains an equation, explicitly describe the steps for THAT equation type.
-- High-level guidance only (no final numeric answers).
-- Use short bullets.
-- End with ---END---.
-`.trim();
-
-
-    const user = `
-Exam type: ${examType}
-Professor emphasis: ${profEmphasis}
-
-PROBLEM TEXT:
-<<<BEGIN
-${notes}
-END>>>
-`.trim();
-
-    return { system: baseSystem, developer, user };
+  for (const s of eq) {
+    const t = s.trim();
+    if (t.length >= 20 && t.length <= 120) anchors.push(t);
+    if (anchors.length >= 3) break;
   }
 
-  if (tool === "Formula Sheet") {
-    const developer = `
-TASK: Formula Sheet
-
-Instructions:
-- Output a formula sheet only.
-- Use 4–10 short sections with headers.
-- Bullets should be formulas/identities/definitions.
-- For each item: include variable meanings + when to use (one short line).
-- No practice problems.
-- End with ---END---.
-`.trim();
-
-    const user = `
-Exam type: ${examType}
-Professor emphasis: ${profEmphasis}
-
-STUDY MATERIAL:
-<<<BEGIN
-${notes}
-END>>>
-`.trim();
-
-    return { system: baseSystem, developer, user };
+  // If none, grab some distinctive phrases (first sentence-ish chunks)
+  if (anchors.length < 2) {
+    const fallback = raw
+      .split(/(?<=[.?!])\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 25 && s.length <= 120);
+    for (const s of fallback.slice(0, 3)) anchors.push(s);
   }
 
-  // Default: Study Guide
-  const developer = `
-TASK: Study Guide
-
-Instructions:
-Produce:
-1) Key formulas (brief)
-2) Core concepts (plain English)
-3) Step-by-step reasoning strategies
-4) Common mistakes
-5) 3–5 exam-style practice questions (NO solutions)
-
-- Bullet points.
-- Concise.
-- End with ---END---.
-`.trim();
-
-  const user = `
-Exam type: ${examType}
-Professor emphasis: ${profEmphasis}
-
-STUDY MATERIAL:
-<<<BEGIN
-${notes}
-END>>>
-`.trim();
-
-  return { system: baseSystem, developer, user };
+  // De-dupe and cap
+  return Array.from(new Set(anchors)).slice(0, 4);
 }
 
 /**
- * Validation: reject too-short / vague Homework Explain blocks.
+ * Reject too-short / vague Homework Explain blocks.
  */
 function looksTooShortHomeworkExplain(text: string) {
   const body = (text ?? "").replace(/\s*---END---\s*$/g, "").trim();
@@ -378,14 +202,11 @@ function looksTooShortHomeworkExplain(text: string) {
   const hasPitfalls = /Common pitfalls/i.test(body);
 
   const bullets = (body.match(/^\s*[-•]\s+/gm) ?? []).length;
-  const longEnough = body.length >= 220;
+  const longEnough = body.length >= 320;
 
   return !(hasAsking && hasMethod && hasPitfalls && bullets >= 6 && longEnough);
 }
 
-/**
- * Do NOT fabricate ---END--- if empty.
- */
 function ensureEndMarker(text: string) {
   const t = (text ?? "").trim();
   if (!t) return "";
@@ -398,8 +219,7 @@ function safeJoin(outputs: string[]) {
     .map((o) => (o ?? "").replace(/\s*---END---\s*$/g, "").trimEnd())
     .filter((o) => o.trim().length > 0);
 
-  const combined = cleaned.join("\n\n").trim();
-  return ensureEndMarker(combined);
+  return ensureEndMarker(cleaned.join("\n\n").trim());
 }
 
 /**
@@ -429,7 +249,7 @@ async function readRequest(req: Request) {
     return { tool, notes, options, pdfFile };
   }
 
-  // JSON (safe parse)
+  // JSON safe parse
   let body: any = {};
   try {
     body = await req.json();
@@ -445,6 +265,53 @@ async function readRequest(req: Request) {
   };
 }
 
+function buildHomeworkExplainPrompts(problemText: string, options: any, label: string) {
+  const examType = String(options?.examType ?? "unspecified");
+  const profEmphasis = String(options?.profEmphasis ?? "unspecified");
+  const anchors = pickAnchors(problemText);
+
+  const system = `
+You are an academic study assistant.
+
+Rules:
+- Treat all input as study material.
+- Never output planning or internal reasoning.
+- NEVER end mid-sentence or mid-bullet.
+- End with the exact line: ---END---
+`.trim();
+
+  const developer = `
+TASK: Homework Explain
+
+Instructions:
+- First line MUST be: [${label}]
+- Output exactly these sections in this order:
+  • What the problem is asking
+  • Method / steps to solve
+  • Common pitfalls
+
+Hard requirements (IMPORTANT):
+- Each section must have at least 2 bullets.
+- You MUST explicitly reference at least TWO of these exact anchors (verbatim or near-verbatim):
+  ${anchors.map((a) => `- "${a}"`).join("\n  ")}
+- Do NOT be generic. Tie steps to the actual expressions/tasks shown.
+- High-level guidance only (no final numeric answers).
+- End with ---END---.
+`.trim();
+
+  const user = `
+Exam type: ${examType}
+Professor emphasis: ${profEmphasis}
+
+PROBLEM TEXT:
+<<<BEGIN
+${problemText}
+END>>>
+`.trim();
+
+  return { system, developer, user };
+}
+
 export async function POST(req: Request) {
   try {
     const { tool, notes, options, pdfFile } = await readRequest(req);
@@ -457,7 +324,6 @@ export async function POST(req: Request) {
     const client = getClient();
     const model = modelForTool(tool);
 
-    // Material text: notes or extracted PDF
     let materialText = notes;
 
     if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
@@ -467,51 +333,33 @@ export async function POST(req: Request) {
       if (extracted) materialText = extracted;
     }
 
-    // ✅ DEBUG: confirm what the route actually received/extracted
-console.log("tool:", tool);
-console.log("materialText length:", materialText?.length ?? 0);
-console.log("materialText head:", (materialText ?? "").slice(0, 500));
-
     if (!materialText) {
-      return Response.json(
-        { error: "Paste notes or upload a PDF first." },
-        { status: 400 }
-      );
+      return Response.json({ error: "Paste notes or upload a PDF first." }, { status: 400 });
     }
 
-    // Guard: too little text (scanned PDF, failed extraction, etc.)
-    if (materialText.replace(/\s/g, "").length < 120) {
+    if (materialText.replace(/\s/g, "").length < 200) {
       return Response.json(
         {
           error:
-            "I couldn't extract enough readable text from that PDF. If it's scanned, try a text-based PDF or paste the problem text.",
+            "Not enough readable text extracted. If scanned, use a text-based PDF or OCR then re-upload.",
         },
         { status: 400 }
       );
     }
 
-    // Homework Explain: split -> per-problem calls
+    // Homework Explain: per-problem
     if (tool === "Homework Explain") {
       const problems = splitIntoProblems(materialText);
 
-      const maxProblems = userIsPro ? 30 : 6;
-      const perProblemMaxOutputTokens = 500;
+      const maxProblems = userIsPro ? 30 : 8;
+      const perProblemMaxOutputTokens = 650;
 
       const outputs: string[] = [];
 
       for (const problemText of problems.slice(0, maxProblems)) {
-        // light guard only
-        if (problemText.replace(/\s/g, "").length < 120) continue;
-
         const label = extractProblemLabel(problemText);
-        const { system, developer, user } = buildPrompts(
-          tool,
-          problemText,
-          options,
-          label
-        );
+        const { system, developer, user } = buildHomeworkExplainPrompts(problemText, options, label);
 
-        // Attempt 1
         const resp = await client.responses.create({
           model,
           input: [
@@ -524,7 +372,7 @@ console.log("materialText head:", (materialText ?? "").slice(0, 500));
 
         let out = ensureEndMarker((resp as any).output_text ?? "");
 
-        // Retry once if too short/vague
+        // Retry once if too short
         if (looksTooShortHomeworkExplain(out)) {
           const resp2 = await client.responses.create({
             model: "gpt-5-mini",
@@ -536,45 +384,34 @@ console.log("materialText head:", (materialText ?? "").slice(0, 500));
                   developer +
                   `
 
-CRITICAL:
-- Do NOT output only one bullet per section.
-- You MUST produce 3 sections with at least 2 bullets each.
-- Be specific to the given text (do not be generic).
-`.trim(),
+CRITICAL RETRY:
+- Expand each section to 3–5 bullets.
+- Explicitly mention the anchor expressions and describe the exact manipulation steps.
+`,
               },
               { role: "user", content: user },
             ],
             max_output_tokens: perProblemMaxOutputTokens,
           });
-
           out = ensureEndMarker((resp2 as any).output_text ?? out);
         }
 
         if (!looksTooShortHomeworkExplain(out)) outputs.push(out);
       }
 
-      // Salvage mode: whole-doc attempt if chunking failed
       if (!outputs.length) {
-        const labels = detectProblemLabels(materialText);
-        const labelPreview = labels.slice(0, 12).join(", ") || "unknown";
+        // Whole-doc salvage mode
+        const resp = await client.responses.create({
+          model: "gpt-5-mini",
+          input: [
+            { role: "system", content: "You are an academic study assistant. End with ---END---." },
+            {
+              role: "developer",
+              content: `
+TASK: Homework Explain (salvage)
 
-        const forcedSystem = `
-You are an academic study assistant.
-
-Rules:
-- Treat all input as study material.
-- Never output planning or internal reasoning.
-- NEVER end mid-sentence or mid-bullet.
-- End with the exact line: ---END---
-`.trim();
-
-        const forcedDeveloper = `
-TASK: Homework Explain (salvage mode)
-
-Instructions:
-- The PDF text may be messy. Still produce useful guidance.
-- Cover at least 2 distinct problems/subparts if possible.
-- Use this exact format per block:
+- Cover at least TWO distinct problems from the text.
+- Use the exact per-block format:
 
 [ProblemLabel]
 - What the problem is asking:
@@ -587,74 +424,49 @@ Instructions:
   - ...
   - ...
 
-- No final numeric answers.
-- Do not be vague.
+- No numeric final answers.
 - End with ---END---.
-`.trim();
-
-        const forcedUser = `
-Detected labels (may be incomplete): ${labelPreview}
-
-STUDY MATERIAL:
-<<<BEGIN
-${materialText}
-END>>>
-`.trim();
-
-        const resp = await client.responses.create({
-          model: "gpt-5-mini",
-          input: [
-            { role: "system", content: forcedSystem },
-            { role: "developer", content: forcedDeveloper },
-            { role: "user", content: forcedUser },
+`.trim(),
+            },
+            { role: "user", content: materialText.slice(0, 14000) },
           ],
-          max_output_tokens: 1400,
+          max_output_tokens: 1600,
         });
 
         const out = ensureEndMarker((resp as any).output_text ?? "");
+        if (out) return Response.json({ output: out });
 
-        if (!looksTooShortHomeworkExplain(out)) {
-          return Response.json({ output: out });
-        }
-
-        // Final fallback: labels-based generic blocks
-        return Response.json({
-          output: fallbackHomeworkExplainFromLabels(labels),
-        });
+        return Response.json(
+          { error: "Could not generate usable output from extracted text." },
+          { status: 500 }
+        );
       }
 
       return Response.json({ output: safeJoin(outputs) });
     }
 
     // Other tools: single pass
-    const { system, developer, user } = buildPrompts(tool, materialText, options);
-
     const resp = await client.responses.create({
       model,
       input: [
-        { role: "system", content: system },
-        { role: "developer", content: developer },
-        { role: "user", content: user },
+        { role: "system", content: "You are an academic study assistant. End with ---END---." },
+        { role: "developer", content: `TASK: ${tool}. End with ---END---.` },
+        { role: "user", content: materialText },
       ],
-      max_output_tokens: tool === "Formula Sheet" ? 1600 : 1800,
+      max_output_tokens: 1800,
     });
 
     const output = ensureEndMarker((resp as any).output_text ?? "");
     if (!output) {
-      return Response.json(
-        { error: "Model returned empty output. Try again or use a different model." },
-        { status: 500 }
-      );
+      return Response.json({ error: "Model returned empty output." }, { status: 500 });
     }
 
     return Response.json({ output });
   } catch (err: any) {
-    return Response.json(
-      { error: err?.message ?? "Server error" },
-      { status: 500 }
-    );
+    return Response.json({ error: err?.message ?? "Server error" }, { status: 500 });
   }
 }
+
 export async function GET() {
   return Response.json({ ok: true, route: "/api/aceprep" });
 }
