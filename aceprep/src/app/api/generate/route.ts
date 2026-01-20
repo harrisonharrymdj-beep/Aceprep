@@ -3,14 +3,16 @@ import OpenAI from "openai";
 import { Buffer } from "node:buffer";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic"; // ✅ avoid caching / edge weirdness
+export const dynamic = "force-dynamic";
+
+// (Optional) helps on serverless if you ever hit timeouts
+export const maxDuration = 60;
 
 /**
  * Extract text from PDF buffer.
  * Use dynamic import to avoid Turbopack build issues.
  */
 async function extractPdfText(buffer: Buffer) {
-  // ✅ dynamic import prevents "export default doesn't exist" build errors
   const pdfParseNS: any = await import("pdf-parse");
   const pdfParse: any = pdfParseNS.default ?? pdfParseNS;
 
@@ -19,7 +21,7 @@ async function extractPdfText(buffer: Buffer) {
 }
 
 /**
- * Best-effort label extractor for chunks ("1", "1(a)", "3(b)(ii)", etc.)
+ * Best-effort label extractor ("1", "1(a)", "3(b)(ii)", etc.)
  */
 function extractProblemLabel(problemText: string) {
   const m = problemText.match(
@@ -29,7 +31,7 @@ function extractProblemLabel(problemText: string) {
 }
 
 /**
- * Lazy client (prevents build-time crashes)
+ * Lazy client
  */
 function getClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -45,12 +47,12 @@ function getClient() {
  * Model selection
  */
 function modelForTool(tool: string) {
-  if (tool === "Homework Explain") return "gpt-5-mini"; // reliability
-  return "gpt-5-nano"; // cheap
+  if (tool === "Homework Explain") return "gpt-5-mini";
+  return "gpt-5-nano";
 }
 
 /**
- * Split assignment into "problem units" (heuristic).
+ * Split into "problem units" (heuristic).
  */
 function splitIntoProblems(text: string) {
   const cleaned = text
@@ -63,10 +65,9 @@ function splitIntoProblems(text: string) {
     /\n(?=(?:Problem\s*)?\d+\s*(?:[\.\)]|\([a-z]\)|\([a-z]\)\([ivx]+\)|\([ivx]+\)))/i
   );
 
-  // ✅ make this stricter so you don’t send junk chunks
   const units = parts
     .map((p) => p.trim())
-    .filter((p) => p.length > 140) // was 40; too small
+    .filter((p) => p.length > 140)
     .filter((p) => /[a-z0-9]/i.test(p));
 
   if (units.length <= 1) return chunkByChars(cleaned, 2200);
@@ -74,7 +75,7 @@ function splitIntoProblems(text: string) {
 }
 
 /**
- * Safe fallback chunker
+ * Fallback chunker
  */
 function chunkByChars(text: string, maxChars = 2200) {
   const lines = text.split("\n");
@@ -83,7 +84,7 @@ function chunkByChars(text: string, maxChars = 2200) {
 
   for (const line of lines) {
     if ((cur + line + "\n").length > maxChars) {
-      if (cur.trim().length > 200) chunks.push(cur.trim()); // ✅ skip tiny chunks
+      if (cur.trim().length > 200) chunks.push(cur.trim());
       cur = "";
     }
     cur += line + "\n";
@@ -194,17 +195,47 @@ END>>>
   return { system: baseSystem, developer, user };
 }
 
+/**
+ * IMPORTANT: do NOT fabricate ---END--- if model returned empty.
+ */
 function ensureEndMarker(text: string) {
-  const t = (text ?? "").trimEnd();
+  const t = (text ?? "").trim();
+  if (!t) return "";
   if (t.endsWith("---END---")) return t;
   return t + "\n---END---";
+}
+
+/**
+ * Robustly pull text from Responses API output.
+ * (Protects you if output_text is missing.)
+ */
+function getOutputText(resp: any): string {
+  if (typeof resp?.output_text === "string") return resp.output_text;
+
+  // fallback: try to reconstruct from output array
+  const out = resp?.output;
+  if (Array.isArray(out)) {
+    let acc = "";
+    for (const item of out) {
+      const content = item?.content;
+      if (Array.isArray(content)) {
+        for (const c of content) {
+          if (typeof c?.text === "string") acc += c.text;
+        }
+      }
+    }
+    return acc;
+  }
+  return "";
 }
 
 function safeJoin(outputs: string[]) {
   const cleaned = outputs
     .map((o) => (o ?? "").replace(/\s*---END---\s*$/g, "").trimEnd())
     .filter(Boolean);
-  return ensureEndMarker(cleaned.join("\n\n").trim());
+
+  const joined = cleaned.join("\n\n").trim();
+  return ensureEndMarker(joined);
 }
 
 /**
@@ -299,18 +330,13 @@ export async function POST(req: Request) {
       const outputs: string[] = [];
 
       for (const problemText of problems.slice(0, maxProblems)) {
-        // ✅ guard: skip junk chunks
         if (!problemText || problemText.replace(/\s/g, "").length < 200) continue;
 
         const label = extractProblemLabel(problemText);
-        const { system, developer, user } = buildPrompts(
-          tool,
-          problemText,
-          options,
-          label
-        );
+        const { system, developer, user } = buildPrompts(tool, problemText, options, label);
 
-        const resp = await client.responses.create({
+        // attempt 1
+        const resp1 = await client.responses.create({
           model,
           input: [
             { role: "system", content: system },
@@ -320,8 +346,8 @@ export async function POST(req: Request) {
           max_output_tokens: perProblemMaxOutputTokens,
         });
 
-        let out = ensureEndMarker((resp as any).output_text ?? "");
-        const bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
+        let out = ensureEndMarker(getOutputText(resp1));
+        let bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
 
         // retry once if empty-ish
         if (bodyOnly.length < 160) {
@@ -346,16 +372,20 @@ CRITICAL:
             max_output_tokens: perProblemMaxOutputTokens,
           });
 
-          out = ensureEndMarker((resp2 as any).output_text ?? out);
+          out = ensureEndMarker(getOutputText(resp2));
+          bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
         }
 
-        outputs.push(out);
+        // if STILL empty, skip it (don’t poison output with blanks)
+        if (bodyOnly.length >= 80) outputs.push(out);
       }
 
-      // ✅ If we somehow got nothing, return a real error instead of blank
       if (!outputs.length) {
         return Response.json(
-          { error: "Could not detect any problems in the text. Try a clearer PDF or paste the text." },
+          {
+            error:
+              "I couldn't generate output from that text (chunks were empty/invalid). Try a clearer PDF or paste the problem text.",
+          },
           { status: 400 }
         );
       }
@@ -376,7 +406,16 @@ CRITICAL:
       max_output_tokens: tool === "Formula Sheet" ? 1600 : 1800,
     });
 
-    return Response.json({ output: ensureEndMarker((resp as any).output_text ?? "") });
+    const output = ensureEndMarker(getOutputText(resp));
+
+    if (!output) {
+      return Response.json(
+        { error: "Model returned empty output. Try again or shorten the input." },
+        { status: 502 }
+      );
+    }
+
+    return Response.json({ output });
   } catch (err: any) {
     return Response.json(
       { error: err?.message ?? "Server error" },
