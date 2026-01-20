@@ -3,25 +3,21 @@ import OpenAI from "openai";
 import { Buffer } from "node:buffer";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-// (Optional) helps on serverless if you ever hit timeouts
-export const maxDuration = 60;
+export const dynamic = "force-dynamic"; // avoid caching / edge weirdness
 
 /**
  * Extract text from PDF buffer.
- * Use dynamic import to avoid Turbopack build issues.
+ * Uses dynamic import to avoid Turbopack build issues with pdf-parse.
  */
 async function extractPdfText(buffer: Buffer) {
   const pdfParseNS: any = await import("pdf-parse");
   const pdfParse: any = pdfParseNS.default ?? pdfParseNS;
-
   const data = await pdfParse(buffer);
   return (data?.text ?? "").trim();
 }
 
 /**
- * Best-effort label extractor ("1", "1(a)", "3(b)(ii)", etc.)
+ * Best-effort label extractor for chunks ("1", "1(a)", "3(b)(ii)", etc.)
  */
 function extractProblemLabel(problemText: string) {
   const m = problemText.match(
@@ -31,7 +27,7 @@ function extractProblemLabel(problemText: string) {
 }
 
 /**
- * Lazy client
+ * Lazy OpenAI client
  */
 function getClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -47,12 +43,39 @@ function getClient() {
  * Model selection
  */
 function modelForTool(tool: string) {
+  // Keep Homework Explain on mini (more reliable formatting).
   if (tool === "Homework Explain") return "gpt-5-mini";
+  // Everything else can be cheaper.
   return "gpt-5-nano";
 }
 
 /**
- * Split into "problem units" (heuristic).
+ * Chunker fallback (never returns empty).
+ */
+function chunkByChars(text: string, maxChars = 2400) {
+  const lines = text.split("\n");
+  const chunks: string[] = [];
+  let cur = "";
+
+  for (const line of lines) {
+    if ((cur + line + "\n").length > maxChars) {
+      const c = cur.trim();
+      if (c.replace(/\s/g, "").length > 80) chunks.push(c);
+      cur = "";
+    }
+    cur += line + "\n";
+  }
+
+  const last = cur.trim();
+  if (last.replace(/\s/g, "").length > 80) chunks.push(last);
+
+  // Absolute fallback: never empty
+  return chunks.length ? chunks : [text.slice(0, maxChars)];
+}
+
+/**
+ * Split assignment into "problem units" (heuristic).
+ * IMPORTANT: keep thresholds LOW because many PDFs have short problem blocks.
  */
 function splitIntoProblems(text: string) {
   const cleaned = text
@@ -62,42 +85,26 @@ function splitIntoProblems(text: string) {
     .trim();
 
   const parts = cleaned.split(
-    /\n(?=(?:Problem\s*)?\d+\s*(?:[\.\)]|\([a-z]\)|\([a-z]\)\([ivx]+\)|\([ivx]+\)))/i
+    /\n(?=(?:Problem\s*)?\d+\s*(?:[.)]|\([a-z]\)|\([a-z]\)\([ivx]+\)|\([ivx]+\)))/i
   );
 
   const units = parts
     .map((p) => p.trim())
-    .filter((p) => p.length > 140)
-    .filter((p) => /[a-z0-9]/i.test(p));
+    .filter((p) => p.replace(/\s/g, "").length > 80);
 
-  if (units.length <= 1) return chunkByChars(cleaned, 2200);
+  if (units.length === 0) return chunkByChars(cleaned, 2400);
   return units;
 }
 
 /**
- * Fallback chunker
+ * Prompt builder (minimal contract, strong format constraints).
  */
-function chunkByChars(text: string, maxChars = 2200) {
-  const lines = text.split("\n");
-  const chunks: string[] = [];
-  let cur = "";
-
-  for (const line of lines) {
-    if ((cur + line + "\n").length > maxChars) {
-      if (cur.trim().length > 200) chunks.push(cur.trim());
-      cur = "";
-    }
-    cur += line + "\n";
-  }
-  if (cur.trim().length > 200) chunks.push(cur.trim());
-
-  return chunks.length ? chunks : [text.slice(0, maxChars)];
-}
-
-/**
- * Minimal prompt contract
- */
-function buildPrompts(tool: string, notes: string, options?: any, label?: string) {
+function buildPrompts(
+  tool: string,
+  notes: string,
+  options?: any,
+  label?: string
+) {
   const examType = String(options?.examType ?? "unspecified");
   const profEmphasis = String(options?.profEmphasis ?? "unspecified");
 
@@ -117,13 +124,13 @@ TASK: Homework Explain
 
 Instructions:
 - First line MUST be: [${label ?? "Problem"}]
-- Output exactly these sections:
+- Output exactly these sections in this order:
   • What the problem is asking
   • Method / steps to solve
   • Common pitfalls
 - Each section must have at least 2 bullets.
 - High-level guidance only (no final numeric answers).
-- Use bullets.
+- Use short bullets.
 - End with ---END---.
 `.trim();
 
@@ -166,6 +173,7 @@ END>>>
     return { system: baseSystem, developer, user };
   }
 
+  // Default: Study Guide
   const developer = `
 TASK: Study Guide
 
@@ -196,7 +204,8 @@ END>>>
 }
 
 /**
- * IMPORTANT: do NOT fabricate ---END--- if model returned empty.
+ * Do NOT fabricate ---END--- if the model returned empty.
+ * (Otherwise you get "it just printed ---END---")
  */
 function ensureEndMarker(text: string) {
   const t = (text ?? "").trim();
@@ -205,41 +214,16 @@ function ensureEndMarker(text: string) {
   return t + "\n---END---";
 }
 
-/**
- * Robustly pull text from Responses API output.
- * (Protects you if output_text is missing.)
- */
-function getOutputText(resp: any): string {
-  if (typeof resp?.output_text === "string") return resp.output_text;
-
-  // fallback: try to reconstruct from output array
-  const out = resp?.output;
-  if (Array.isArray(out)) {
-    let acc = "";
-    for (const item of out) {
-      const content = item?.content;
-      if (Array.isArray(content)) {
-        for (const c of content) {
-          if (typeof c?.text === "string") acc += c.text;
-        }
-      }
-    }
-    return acc;
-  }
-  return "";
-}
-
 function safeJoin(outputs: string[]) {
   const cleaned = outputs
     .map((o) => (o ?? "").replace(/\s*---END---\s*$/g, "").trimEnd())
-    .filter(Boolean);
-
-  const joined = cleaned.join("\n\n").trim();
-  return ensureEndMarker(joined);
+    .filter((o) => o.trim().length > 0);
+  const combined = cleaned.join("\n\n").trim();
+  return ensureEndMarker(combined);
 }
 
 /**
- * Read request (JSON or multipart)
+ * Read request (JSON or multipart/form-data).
  */
 async function readRequest(req: Request) {
   const contentType = req.headers.get("content-type") ?? "";
@@ -265,6 +249,7 @@ async function readRequest(req: Request) {
     return { tool, notes, options, pdfFile };
   }
 
+  // JSON (safe parse)
   let body: any = {};
   try {
     body = await req.json();
@@ -284,6 +269,7 @@ export async function POST(req: Request) {
   try {
     const { tool, notes, options, pdfFile } = await readRequest(req);
 
+    // (Optional) pro gating placeholder
     const userIsPro = false;
     if (tool === "Exam Pack" && !userIsPro) {
       return Response.json({ error: "Exam Pack is Pro-only." }, { status: 403 });
@@ -292,27 +278,17 @@ export async function POST(req: Request) {
     const client = getClient();
     const model = modelForTool(tool);
 
+    // 1) Material text: notes or extracted PDF
     let materialText = notes;
 
-    // PDF upload -> extract server side
     if (pdfFile && typeof (pdfFile as any).arrayBuffer === "function") {
       const ab = await (pdfFile as File).arrayBuffer();
       const buffer = Buffer.from(ab);
       const extracted = await extractPdfText(buffer);
-
       if (extracted) materialText = extracted;
-
-      if (!materialText || materialText.replace(/\s/g, "").length < 200) {
-        return Response.json(
-          {
-            error:
-              "I couldn't extract enough readable text from that PDF. Try another PDF or paste the text content.",
-          },
-          { status: 400 }
-        );
-      }
     }
 
+    // guard: still nothing
     if (!materialText) {
       return Response.json(
         { error: "Paste notes or upload a PDF first." },
@@ -320,7 +296,18 @@ export async function POST(req: Request) {
       );
     }
 
-    // Homework Explain = per-problem calls
+    // guard: extracted too little (common with scanned PDFs)
+    if (materialText.replace(/\s/g, "").length < 120) {
+      return Response.json(
+        {
+          error:
+            "I couldn't extract enough readable text from that PDF. If it's scanned, try a text-based PDF or paste the problem text.",
+        },
+        { status: 400 }
+      );
+    }
+
+    // 2) Homework Explain = per-problem calls
     if (tool === "Homework Explain") {
       const problems = splitIntoProblems(materialText);
 
@@ -330,13 +317,19 @@ export async function POST(req: Request) {
       const outputs: string[] = [];
 
       for (const problemText of problems.slice(0, maxProblems)) {
-        if (!problemText || problemText.replace(/\s/g, "").length < 200) continue;
+        // light guard only (don’t skip everything)
+        if (problemText.replace(/\s/g, "").length < 80) continue;
 
         const label = extractProblemLabel(problemText);
-        const { system, developer, user } = buildPrompts(tool, problemText, options, label);
+        const { system, developer, user } = buildPrompts(
+          tool,
+          problemText,
+          options,
+          label
+        );
 
-        // attempt 1
-        const resp1 = await client.responses.create({
+        // Attempt 1
+        const resp = await client.responses.create({
           model,
           input: [
             { role: "system", content: system },
@@ -346,11 +339,11 @@ export async function POST(req: Request) {
           max_output_tokens: perProblemMaxOutputTokens,
         });
 
-        let out = ensureEndMarker(getOutputText(resp1));
+        let out = ensureEndMarker((resp as any).output_text ?? "");
         let bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
 
-        // retry once if empty-ish
-        if (bodyOnly.length < 160) {
+        // If basically empty, retry once with stricter instruction
+        if (bodyOnly.length < 120) {
           const resp2 = await client.responses.create({
             model: "gpt-5-mini",
             input: [
@@ -364,27 +357,52 @@ export async function POST(req: Request) {
 CRITICAL:
 - Do NOT output only ---END---.
 - You MUST include all 3 sections with at least 2 bullets each.
-- If unclear, write generic but relevant steps for this type of EE problem.
-`,
+- If the text is brief, infer the likely task type and still provide relevant steps.
+`.trim(),
               },
               { role: "user", content: user },
             ],
             max_output_tokens: perProblemMaxOutputTokens,
           });
 
-          out = ensureEndMarker(getOutputText(resp2));
+          out = ensureEndMarker((resp2 as any).output_text ?? out);
           bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
         }
 
-        // if STILL empty, skip it (don’t poison output with blanks)
-        if (bodyOnly.length >= 80) outputs.push(out);
+        if (bodyOnly.length >= 120) outputs.push(out);
       }
 
+      // 2b) Last resort: if chunking failed, run whole doc once
       if (!outputs.length) {
+        const label = "Homework";
+        const { system, developer, user } = buildPrompts(
+          tool,
+          materialText,
+          options,
+          label
+        );
+
+        const resp = await client.responses.create({
+          model: "gpt-5-mini",
+          input: [
+            { role: "system", content: system },
+            { role: "developer", content: developer },
+            { role: "user", content: user },
+          ],
+          max_output_tokens: 900,
+        });
+
+        const out = ensureEndMarker((resp as any).output_text ?? "");
+        const bodyOnly = out.replace(/\s*---END---\s*$/g, "").trim();
+
+        if (bodyOnly.length >= 120) {
+          return Response.json({ output: out });
+        }
+
         return Response.json(
           {
             error:
-              "I couldn't generate output from that text (chunks were empty/invalid). Try a clearer PDF or paste the problem text.",
+              "I couldn't generate a usable Homework Explain response from this text. Try pasting the problem text or uploading a clearer (text-based) PDF.",
           },
           { status: 400 }
         );
@@ -393,7 +411,7 @@ CRITICAL:
       return Response.json({ output: safeJoin(outputs) });
     }
 
-    // single pass tools
+    // 3) Other tools: single pass
     const { system, developer, user } = buildPrompts(tool, materialText, options);
 
     const resp = await client.responses.create({
@@ -406,12 +424,11 @@ CRITICAL:
       max_output_tokens: tool === "Formula Sheet" ? 1600 : 1800,
     });
 
-    const output = ensureEndMarker(getOutputText(resp));
-
+    const output = ensureEndMarker((resp as any).output_text ?? "");
     if (!output) {
       return Response.json(
-        { error: "Model returned empty output. Try again or shorten the input." },
-        { status: 502 }
+        { error: "Model returned empty output. Try again or use a different model." },
+        { status: 500 }
       );
     }
 
