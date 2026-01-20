@@ -118,7 +118,7 @@ export default function Home() {
           ? `PDF TEXT (${pdfFileName ?? "uploaded.pdf"}):\n${pdfText.trim()}`
           : "");
 
-      const data = await safePostJSON("/api/aceprep", {
+      const data = await safePostJSON("/api/generate", {
   tool,
   notes: combinedNotes,
   options: { examType, profEmphasis },
