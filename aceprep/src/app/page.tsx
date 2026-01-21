@@ -1,352 +1,532 @@
-"use client";
+// app/page.tsx
+import Link from "next/link";
+import { Check, Code2, Sparkles, Zap, Shield, BookOpen, ArrowRight, Star } from "lucide-react";
+import type { ReactNode } from "react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 
-import { useMemo, useState } from "react";
-import { safePostJSON } from "@/lib/api";
-
-
-const adDurationMs = 15000; // 15s ad
-const DAILY_FREE_LIMIT = 10; // <-- change here
-
-type ToolName =
-  | "Study Guide"
-  | "Exam Pack"
-  | "Formula Sheet"
-  | "Homework Explain"
-  | "Essay Outline";
-
-
-
-export default function Home() {
-  const [tool, setTool] = useState<ToolName>("Study Guide");
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [isWatchingAd, setIsWatchingAd] = useState(false);
-  const [adSecondsLeft, setAdSecondsLeft] = useState<number>(
-    Math.ceil(adDurationMs / 1000)
-  );
-
-  const [notes, setNotes] = useState("");
-  const [examType, setExamType] = useState("");
-  const [profEmphasis, setProfEmphasis] = useState("");
-
-  const [loading, setLoading] = useState(false);
-  const [output, setOutput] = useState("Generated content will appear here.");
-  const [error, setError] = useState<string | null>(null);
-
-  // ✅ PDF UI + hidden extracted text (still client-side for now)
-  const [pdfFileName, setPdfFileName] = useState<string | null>(null);
-  const [pdfText, setPdfText] = useState<string>("");
-
-  const toolDescription = useMemo(() => {
-    switch (tool) {
-      case "Study Guide":
-        return "Turn notes into a clean, exam-ready study guide.";
-      case "Formula Sheet":
-        return "Extract formulas, definitions, and key relationships.";
-      case "Homework Explain":
-        return "Explain concepts step-by-step.";
-      case "Essay Outline":
-        return "Create a thesis + outline + key points.";
-      case "Exam Pack":
-        return "Generate practice questions (Pro only).";
-      default:
-        return "";
-    }
-  }, [tool]);
-
-  function onGenerateClick() {
-    setError(null);
-    setIsModalOpen(true);
-  }
-
-  function checkDailyLimit() {
-    const today = new Date().toDateString();
-    const key = `aceprep_free_${today}`;
-    const used = Number(localStorage.getItem(key) ?? 0);
-
-    if (used >= DAILY_FREE_LIMIT) {
-      setError(
-        `Daily free limit reached (${DAILY_FREE_LIMIT}/day). Try again tomorrow or go Pro.`
-      );
-      return false;
-    }
-    localStorage.setItem(key, String(used + 1));
-    return true;
-  }
-
-  function startMockAd() {
-    if (isWatchingAd) return;
-
-    const hasMaterial = notes.trim().length > 0 || pdfText.trim().length > 0;
-    if (!hasMaterial) {
-      setError("Paste notes or upload a PDF first.");
-      return;
-    }
-    if (!checkDailyLimit()) return;
-
-    setIsWatchingAd(true);
-    setAdSecondsLeft(Math.ceil(adDurationMs / 1000));
-
-    // Start AI immediately (in background)
-    runGeneration();
-
-    const start = Date.now();
-    const timer = setInterval(() => {
-      const elapsed = Date.now() - start;
-      const remaining = Math.max(
-        0,
-        Math.ceil((adDurationMs - elapsed) / 1000)
-      );
-      setAdSecondsLeft(remaining);
-
-      if (elapsed >= adDurationMs) {
-        clearInterval(timer);
-        setIsWatchingAd(false);
-        setIsModalOpen(false);
-      }
-    }, 250);
-  }
-
-  async function runGeneration() {
-    try {
-      setLoading(true);
-      setError(null);
-      setOutput("Generating…");
-
-      const combinedNotes =
-        (notes.trim() ? `USER NOTES:\n${notes.trim()}\n\n` : "") +
-        (pdfText.trim()
-          ? `PDF TEXT (${pdfFileName ?? "uploaded.pdf"}):\n${pdfText.trim()}`
-          : "");
-
-      const data = await safePostJSON("/api/generate", {
-  tool,
-  notes: combinedNotes,
-  options: { examType, profEmphasis },
-});
-
-setOutput(data.output ?? "No output returned.");
-
-    } catch (e: any) {
-      setError(e?.message ?? "Something went wrong.");
-      setOutput("Generated content will appear here.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handlePdfUpload(file: File) {
-    setError(null);
-    setPdfFileName(file.name);
-
-    try {
-      const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      (pdfjsLib as any).GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-
-      const buffer = await file.arrayBuffer();
-      const pdf = await (pdfjsLib as any).getDocument({ data: buffer }).promise;
-
-      let text = "";
-      const maxPages = Math.min(pdf.numPages, 10);
-
-      for (let i = 1; i <= maxPages; i++) {
-        const page = await pdf.getPage(i);
-        const content = await page.getTextContent();
-        text += (content.items as any[]).map((it) => it.str).join(" ") + "\n";
-      }
-
-      const clipped = text.slice(0, 30000).trim();
-      if (!clipped || clipped.replace(/\s/g, "").length < 200) {
-        setError(
-          "Couldn’t extract enough readable text from that PDF. Try another PDF or paste the text."
-        );
-      }
-      setPdfText(clipped);
-    } catch (e: any) {
-      console.error(e);
-      setPdfFileName(null);
-      setPdfText("");
-      setError(`PDF read failed: ${e?.message ?? String(e)}`);
-    }
-  }
-
-  function removePdf() {
-    setPdfFileName(null);
-    setPdfText("");
-  }
-
+export default function Page() {
   return (
-    <div className="min-h-screen bg-zinc-100 text-black">
-      <header className="flex items-center justify-between border-b bg-white px-6 py-4">
-        <span className="text-xl font-semibold">AcePrep</span>
-        <div className="flex gap-3">
-          <button className="rounded-md border px-4 py-1.5 text-sm">
-            Login / Sign Up
-          </button>
-          <button className="rounded-md border px-3 py-1.5 text-sm">☰</button>
+    <main className="min-h-screen bg-background text-foreground">
+      <SiteHeader />
+
+      {/* Hero */}
+      <section className="mx-auto max-w-6xl px-4 pt-16 pb-10 sm:pt-20">
+        <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
+          <div className="space-y-6">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary" className="rounded-full px-3 py-1">
+                <Sparkles className="mr-1 h-3.5 w-3.5" />
+                AcePrep — coding interview prep that actually sticks
+              </Badge>
+              <Badge variant="outline" className="rounded-full px-3 py-1">
+                <Shield className="mr-1 h-3.5 w-3.5" />
+                Built for focus
+              </Badge>
+            </div>
+
+            <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
+              Practice smart. Get hired faster.
+            </h1>
+
+            <p className="text-lg text-muted-foreground">
+              AcePrep turns messy LeetCode grinding into a clear plan: personalized drills, spaced repetition,
+              and feedback that tells you exactly what to fix—so your next interview feels familiar.
+            </p>
+
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <Button asChild size="lg" className="rounded-2xl">
+                <Link href="/app">
+                  Start prepping <ArrowRight className="ml-2 h-4 w-4" />
+                </Link>
+              </Button>
+              <Button asChild variant="outline" size="lg" className="rounded-2xl">
+                <Link href="#pricing">View pricing</Link>
+              </Button>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <div className="flex items-center">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <Star key={i} className="h-4 w-4" />
+                  ))}
+                </div>
+                <span>Built for serious students</span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-3 pt-2 text-sm text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <Zap className="h-4 w-4" />
+                Daily plan in 60 seconds
+              </div>
+              <div className="flex items-center gap-2">
+                <Code2 className="h-4 w-4" />
+                DSA + system design
+              </div>
+              <div className="flex items-center gap-2">
+                <BookOpen className="h-4 w-4" />
+                Study mode + mock mode
+              </div>
+            </div>
+          </div>
+
+          <HeroPreview />
         </div>
-      </header>
+      </section>
 
-      {/* MAIN LAYOUT (with side ads) */}
-      <div className="mx-auto grid max-w-7xl grid-cols-12 gap-4 px-4 py-6">
-        {/* LEFT ADS */}
-        <aside className="col-span-12 hidden md:col-span-3 md:block">
-          <div className="sticky top-24 rounded-xl border bg-white p-4">
-            <p className="mb-2 text-sm font-medium text-zinc-600">Sponsored</p>
-            <div className="h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
-              Ad slot (left)
+      {/* Logos / Social proof strip */}
+      <section className="mx-auto max-w-6xl px-4 pb-8">
+        <Card className="rounded-3xl">
+          <CardContent className="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">What you get</p>
+              <p className="text-sm text-muted-foreground">
+                Structured prep, measurable progress, and fewer “I blanked” moments.
+              </p>
             </div>
-            <div className="mt-3 h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
-              Ad slot (left 2)
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="secondary" className="rounded-full px-3 py-1">
+                Daily plan
+              </Badge>
+              <Badge variant="secondary" className="rounded-full px-3 py-1">
+                Weakness tracking
+              </Badge>
+              <Badge variant="secondary" className="rounded-full px-3 py-1">
+                Spaced repetition
+              </Badge>
+              <Badge variant="secondary" className="rounded-full px-3 py-1">
+                Mock interviews
+              </Badge>
             </div>
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* Features */}
+      <section id="features" className="mx-auto max-w-6xl px-4 py-12">
+        <div className="mb-8 space-y-2">
+          <h2 className="text-3xl font-semibold tracking-tight">Everything you need to prep with confidence</h2>
+          <p className="text-muted-foreground">
+            Simple on the surface. Deep where it matters: patterns, recall, and execution.
+          </p>
+        </div>
+
+        <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
+          <FeatureCard
+            icon={<Zap className="h-5 w-5" />}
+            title="Daily plan that adapts"
+            desc="Answer a quick check-in; AcePrep generates the most impactful next set."
+          />
+          <FeatureCard
+            icon={<Sparkles className="h-5 w-5" />}
+            title="Spaced repetition, automated"
+            desc="Bring back old problems at the right time so you retain patterns."
+          />
+          <FeatureCard
+            icon={<Code2 className="h-5 w-5" />}
+            title="Solution feedback"
+            desc="Get pinpoint guidance on complexity, edge cases, and cleaner approaches."
+          />
+          <FeatureCard
+            icon={<BookOpen className="h-5 w-5" />}
+            title="Study mode + mock mode"
+            desc="Learn with hints, then switch to timed mocks with debriefs."
+          />
+          <FeatureCard
+            icon={<Shield className="h-5 w-5" />}
+            title="Progress you can trust"
+            desc="Track mastery by topic, not just “problems solved.”"
+          />
+          <FeatureCard
+            icon={<ArrowRight className="h-5 w-5" />}
+            title="Interview-ready roadmap"
+            desc="Weeks 1–2 fundamentals, weeks 3–4 patterns, weeks 5–6 mocks—adjusted to you."
+          />
+        </div>
+      </section>
+
+      {/* Pricing */}
+      <section id="pricing" className="mx-auto max-w-6xl px-4 py-12">
+        <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="space-y-2">
+            <h2 className="text-3xl font-semibold tracking-tight">Pricing</h2>
+            <p className="text-muted-foreground">Pick the plan that matches your timeline.</p>
           </div>
-        </aside>
-
-        {/* CENTER */}
-        <main className="col-span-12 md:col-span-6">
-          <div className="rounded-xl border bg-white p-6 shadow-sm">
-            {/* DOCUMENT TYPE */}
-            <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
-              <label className="mb-2 block text-sm font-medium">Document type</label>
-
-              <div className="grid grid-cols-2 gap-2">
-                {["Study Guide", "Formula Sheet", "Homework Explain", "Essay Outline"].map(
-                  (t) => (
-                    <button
-                      key={t}
-                      onClick={() => setTool(t as ToolName)}
-                      className={`rounded-md border px-3 py-2 text-sm ${
-                        tool === t ? "bg-black text-white" : "bg-white"
-                      }`}
-                    >
-                      {t}
-                    </button>
-                  )
-                )}
-
-                <button
-                  disabled
-                  className="rounded-md border px-3 py-2 text-sm bg-white opacity-50 cursor-not-allowed"
-                  title="Pro only"
-                >
-                  Exam Pack 🔒
-                </button>
-              </div>
-
-              <p className="mt-2 text-xs text-zinc-500">{toolDescription}</p>
-            </div>
-
-            {/* NOTES + PDF */}
-            <div className="mb-4 rounded-lg border bg-zinc-50 p-4">
-              <label className="mb-2 block text-sm font-medium">
-                Paste notes (PDF text is hidden)
-              </label>
-
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Paste notes here…"
-                className="h-32 w-full resize-none rounded-md border px-3 py-2 text-sm"
-              />
-
-              <div className="mt-3 flex items-center gap-3">
-                <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border bg-white px-3 py-2 text-sm hover:bg-zinc-50">
-                  <span className="text-base font-semibold">＋</span>
-                  <span>Add PDF</span>
-                  <input
-                    type="file"
-                    accept="application/pdf"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) handlePdfUpload(f);
-                      e.currentTarget.value = "";
-                    }}
-                  />
-                </label>
-
-                {pdfFileName && (
-                  <div className="flex items-center gap-2 rounded-full border bg-white px-3 py-1.5 text-sm">
-                    <span className="max-w-[220px] truncate">{pdfFileName}</span>
-                    <button
-                      type="button"
-                      onClick={removePdf}
-                      className="rounded-full px-2 py-0.5 text-zinc-600 hover:bg-zinc-100"
-                      aria-label="Remove PDF"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                )}
-
-                {pdfFileName && (
-                  <span className="text-xs text-zinc-500">
-                    PDF uploaded (text will be included automatically)
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <button
-              onClick={onGenerateClick}
-              disabled={loading}
-              className="w-full rounded-lg bg-black py-3 text-sm font-medium text-white disabled:opacity-50"
-            >
-              {loading ? "Generating…" : "Generate ▶"}
-            </button>
-
-            {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-
-            <pre className="mt-4 h-64 overflow-auto rounded-md border bg-white p-3 text-sm">
-              {output}
-            </pre>
+          <div className="text-sm text-muted-foreground">
+            Cancel anytime. Upgrade/downgrade anytime.
           </div>
-        </main>
+        </div>
 
-        {/* RIGHT ADS */}
-        <aside className="col-span-12 hidden md:col-span-3 md:block">
-          <div className="sticky top-24 rounded-xl border bg-white p-4">
-            <p className="mb-2 text-sm font-medium text-zinc-600">Ads</p>
-            <div className="h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
-              Ad slot (right)
+        <div className="grid gap-5 lg:grid-cols-3">
+          <PricingCard
+            name="Starter"
+            price="$19"
+            cadence="/mo"
+            blurb="For consistent practice and steady improvement."
+            cta={{ label: "Start Starter", href: "/checkout?plan=starter" }}
+            features={[
+              "Personalized daily plan",
+              "Topic mastery tracking",
+              "Spaced repetition reviews",
+              "Core DSA library",
+            ]}
+          />
+
+          <PricingCard
+            highlight
+            name="Pro"
+            price="$39"
+            cadence="/mo"
+            blurb="Best for interview season: drills + mocks + deeper feedback."
+            cta={{ label: "Start Pro", href: "/checkout?plan=pro" }}
+            features={[
+              "Everything in Starter",
+              "Timed mock interviews",
+              "Deeper solution feedback",
+              "Company-style problem sets",
+              "System design prompts",
+            ]}
+            badge="Most popular"
+          />
+
+          <PricingCard
+            name="Team"
+            price="$99"
+            cadence="/mo"
+            blurb="For clubs, cohorts, and friend groups prepping together."
+            cta={{ label: "Start Team", href: "/checkout?plan=team" }}
+            features={[
+              "Up to 5 seats",
+              "Shared progress dashboard",
+              "Weekly challenge packs",
+              "Admin controls",
+            ]}
+          />
+        </div>
+      </section>
+
+      {/* Testimonials */}
+      <section className="mx-auto max-w-6xl px-4 py-12">
+        <div className="mb-8 space-y-2">
+          <h2 className="text-3xl font-semibold tracking-tight">Results-focused</h2>
+          <p className="text-muted-foreground">Less grinding. More signal.</p>
+        </div>
+
+        <div className="grid gap-5 md:grid-cols-3">
+          <Testimonial
+            quote="The daily plan removed decision fatigue. I stopped jumping around and finally got consistent."
+            name="Student"
+            meta="CS junior"
+          />
+          <Testimonial
+            quote="The reviews hit at the perfect time. Stuff I used to forget stayed locked in."
+            name="New Grad"
+            meta="Interviewing"
+          />
+          <Testimonial
+            quote="Mock mode + debriefs made the real thing feel normal. Huge confidence boost."
+            name="Career Switcher"
+            meta="Bootcamp grad"
+          />
+        </div>
+      </section>
+
+      {/* FAQ */}
+      <section id="faq" className="mx-auto max-w-6xl px-4 py-12">
+        <div className="mb-8 space-y-2">
+          <h2 className="text-3xl font-semibold tracking-tight">FAQ</h2>
+          <p className="text-muted-foreground">Quick answers to common questions.</p>
+        </div>
+
+        <Card className="rounded-3xl">
+          <CardContent className="p-2 sm:p-4">
+            <Accordion type="single" collapsible className="w-full">
+              <AccordionItem value="item-1">
+                <AccordionTrigger className="px-3">How is this different from LeetCode?</AccordionTrigger>
+                <AccordionContent className="px-3 text-muted-foreground">
+                  AcePrep focuses on planning, recall, and execution. You get an adaptive plan, spaced repetition,
+                  and feedback loops—so you improve faster than random problem-hopping.
+                </AccordionContent>
+              </AccordionItem>
+
+              <AccordionItem value="item-2">
+                <AccordionTrigger className="px-3">Do I need to be advanced?</AccordionTrigger>
+                <AccordionContent className="px-3 text-muted-foreground">
+                  Nope. The plan adapts to your level. Beginners build foundations; advanced users sharpen patterns and mocks.
+                </AccordionContent>
+              </AccordionItem>
+
+              <AccordionItem value="item-3">
+                <AccordionTrigger className="px-3">Can I cancel anytime?</AccordionTrigger>
+                <AccordionContent className="px-3 text-muted-foreground">
+                  Yes—cancel whenever. You’ll keep access until the end of your billing period.
+                </AccordionContent>
+              </AccordionItem>
+
+              <AccordionItem value="item-4">
+                <AccordionTrigger className="px-3">What languages are supported?</AccordionTrigger>
+                <AccordionContent className="px-3 text-muted-foreground">
+                  Start with your main interview language (Python/Java/C++/JavaScript). The platform is designed to expand,
+                  but your plan and mocks should match the language you’ll interview in.
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* CTA */}
+      <section className="mx-auto max-w-6xl px-4 pb-16 pt-6">
+        <Card className="rounded-3xl">
+          <CardContent className="flex flex-col gap-6 p-8 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-2">
+              <h3 className="text-2xl font-semibold tracking-tight">Ready to start?</h3>
+              <p className="text-muted-foreground">
+                Get your plan, do today’s set, and keep building momentum.
+              </p>
             </div>
-            <div className="mt-3 h-64 rounded-lg border bg-zinc-50 flex items-center justify-center text-xs text-zinc-500">
-              Ad slot (right 2)
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <Button asChild size="lg" className="rounded-2xl">
+                <Link href="/app">
+                  Start now <ArrowRight className="ml-2 h-4 w-4" />
+                </Link>
+              </Button>
+              <Button asChild variant="outline" size="lg" className="rounded-2xl">
+                <Link href="#pricing">See plans</Link>
+              </Button>
             </div>
+          </CardContent>
+        </Card>
+
+        <Footer />
+      </section>
+    </main>
+  );
+}
+
+function SiteHeader() {
+  return (
+    <header className="sticky top-0 z-40 border-b bg-background/70 backdrop-blur">
+      <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
+        <Link href="/" className="flex items-center gap-2">
+          <div className="grid h-9 w-9 place-items-center rounded-2xl border">
+            <Code2 className="h-5 w-5" />
           </div>
-        </aside>
+          <span className="text-sm font-semibold tracking-tight">AcePrep</span>
+        </Link>
+
+        <nav className="hidden items-center gap-6 sm:flex">
+          <Link href="#features" className="text-sm text-muted-foreground hover:text-foreground">
+            Features
+          </Link>
+          <Link href="#pricing" className="text-sm text-muted-foreground hover:text-foreground">
+            Pricing
+          </Link>
+          <Link href="#faq" className="text-sm text-muted-foreground hover:text-foreground">
+            FAQ
+          </Link>
+        </nav>
+
+        <div className="flex items-center gap-2">
+          <Button asChild variant="ghost" className="rounded-2xl">
+            <Link href="/login">Log in</Link>
+          </Button>
+          <Button asChild className="rounded-2xl">
+            <Link href="/app">Get started</Link>
+          </Button>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function HeroPreview() {
+  return (
+    <Card className="rounded-3xl">
+      <CardHeader>
+        <CardTitle className="text-base">Your prep dashboard</CardTitle>
+        <CardDescription>Today’s plan, progress, and next-best actions.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <MiniStat label="Today" value="3 tasks" hint="~45–60 min" />
+          <MiniStat label="Streak" value="7 days" hint="Consistency wins" />
+        </div>
+
+        <div className="rounded-3xl border p-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium">Today’s set</p>
+            <Badge variant="secondary" className="rounded-full">
+              Adaptive
+            </Badge>
+          </div>
+          <div className="mt-3 space-y-3">
+            <TaskRow title="2-pointer pattern drill" meta="Arrays • Medium • 12–15 min" />
+            <TaskRow title="Binary search variants" meta="Search • Mixed • 15–20 min" />
+            <TaskRow title="Timed mock (mini)" meta="Mock • 1 question • 15 min" />
+          </div>
+          <Separator className="my-4" />
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-muted-foreground">Next review: “Top K Elements” in 2 days</p>
+            <Button asChild size="sm" className="rounded-2xl">
+              <Link href="/app">
+                Start now <ArrowRight className="ml-2 h-4 w-4" />
+              </Link>
+            </Button>
+
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Chip label="Weakness" value="Graphs" />
+          <Chip label="Strong" value="Sliding Window" />
+          <Chip label="Focus" value="DP basics" />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function MiniStat({ label, value, hint }: { label: string; value: string; hint: string }) {
+  return (
+    <div className="rounded-3xl border p-4">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-xl font-semibold">{value}</p>
+      <p className="mt-1 text-xs text-muted-foreground">{hint}</p>
+    </div>
+  );
+}
+
+function TaskRow({ title, meta }: { title: string; meta: string }) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="mt-0.5 grid h-6 w-6 place-items-center rounded-2xl border">
+        <Check className="h-4 w-4" />
+      </div>
+      <div className="min-w-0">
+        <p className="text-sm font-medium">{title}</p>
+        <p className="text-xs text-muted-foreground">{meta}</p>
+      </div>
+    </div>
+  );
+}
+
+function Chip({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-3xl border p-4">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-sm font-medium">{value}</p>
+    </div>
+  );
+}
+
+function FeatureCard({ icon, title, desc }: { icon: ReactNode; title: string; desc: string }) {
+  return (
+    <Card className="rounded-3xl">
+      <CardHeader className="space-y-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-2xl border">{icon}</div>
+        <CardTitle className="text-base">{title}</CardTitle>
+        <CardDescription>{desc}</CardDescription>
+      </CardHeader>
+    </Card>
+  );
+}
+
+function PricingCard({
+  name,
+  price,
+  cadence,
+  blurb,
+  features,
+  cta,
+  highlight,
+  badge,
+}: {
+  name: string;
+  price: string;
+  cadence: string;
+  blurb: string;
+  features: string[];
+  cta: { label: string; href: string };
+  highlight?: boolean;
+  badge?: string;
+}) {
+  return (
+    <Card className={`rounded-3xl ${highlight ? "border-foreground/30 shadow-sm" : ""}`}>
+      <CardHeader className="space-y-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base">{name}</CardTitle>
+          {badge ? <Badge className="rounded-full">{badge}</Badge> : null}
+        </div>
+        <div className="flex items-baseline gap-2">
+          <span className="text-4xl font-semibold tracking-tight">{price}</span>
+          <span className="text-sm text-muted-foreground">{cadence}</span>
+        </div>
+        <CardDescription>{blurb}</CardDescription>
+      </CardHeader>
+
+      <CardContent className="space-y-5">
+        <Button asChild className="w-full rounded-2xl" variant={highlight ? "default" : "outline"}>
+          <Link href={cta.href}>{cta.label}</Link>
+        </Button>
+
+        <ul className="space-y-2">
+          {features.map((f) => (
+            <li key={f} className="flex items-start gap-2 text-sm">
+              <Check className="mt-0.5 h-4 w-4" />
+              <span className="text-muted-foreground">{f}</span>
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Testimonial({ quote, name, meta }: { quote: string; name: string; meta: string }) {
+  return (
+    <Card className="rounded-3xl">
+      <CardContent className="space-y-3 p-6">
+        <p className="text-sm leading-relaxed">“{quote}”</p>
+        <Separator />
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium">{name}</p>
+          <p className="text-xs text-muted-foreground">{meta}</p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="mx-auto mt-10 max-w-6xl px-1">
+      <div className="flex flex-col gap-6 rounded-3xl border p-6 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-1">
+          <p className="text-sm font-semibold">AcePrep</p>
+          <p className="text-xs text-muted-foreground">
+            Build the habits. Master the patterns. Walk into interviews calm.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-3 text-sm">
+          <Link href="/terms" className="text-muted-foreground hover:text-foreground">
+            Terms
+          </Link>
+          <Link href="/privacy" className="text-muted-foreground hover:text-foreground">
+            Privacy
+          </Link>
+          <Link href="/support" className="text-muted-foreground hover:text-foreground">
+            Support
+          </Link>
+        </div>
       </div>
 
-      {/* AD MODAL */}
-      {isModalOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white p-5 rounded-xl w-full max-w-md">
-            <p className="font-semibold mb-2">Watch a short ad</p>
-            <div className="h-24 border mb-2 bg-zinc-50" />
-            {isWatchingAd && (
-              <p className="text-sm">Ad ends in {adSecondsLeft}s…</p>
-            )}
-
-            <div className="mt-3 flex gap-2">
-              <button
-                onClick={() => setIsModalOpen(false)}
-                disabled={isWatchingAd}
-                className="flex-1 rounded-lg border py-2 text-sm disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={startMockAd}
-                disabled={isWatchingAd}
-                className="flex-1 bg-black text-white py-2 rounded-lg text-sm disabled:opacity-50"
-              >
-                {isWatchingAd
-                  ? "Watching…"
-                  : `Watch Ad (${Math.ceil(adDurationMs / 1000)}s)`}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+      <p className="py-6 text-center text-xs text-muted-foreground">
+        © {new Date().getFullYear()} AcePrep. All rights reserved.
+      </p>
+    </footer>
   );
 }
