@@ -654,35 +654,35 @@ export async function POST(req: Request) {
     const attempt = async () => {
       // Special-case reviewer so TypeScript knows the schema
       if (tool === "reviewer") {
+        const res = await generateObject({
+          model: openai(providerModelId),
+          schema: ReviewerSchema,
+          system: sys,
+          prompt,
+          temperature: 0.2,
+        });
+
+        // Enforce rule when no answerKey
+        if (!hasAnswerKey) {
+          // res.object is already typed as ReviewerSchema output
+          if (res.object.finalAnswerProvided !== false) {
+            res.object.finalAnswerProvided = false;
+          }
+        }
+        return res;
+      }
+
+      // All other tools
       const res = await generateObject({
         model: openai(providerModelId),
-        schema: ReviewerSchema,
+        schema,
         system: sys,
         prompt,
         temperature: 0.2,
       });
 
-      // Enforce rule when no answerKey
-      if (!hasAnswerKey) {
-        // res.object is already typed as ReviewerSchema output
-        if (res.object.finalAnswerProvided !== false) {
-          res.object.finalAnswerProvided = false;
-        }
-      }
       return res;
-    }
-
-  // All other tools
-  const res = await generateObject({
-    model: openai(providerModelId),
-    schema,
-    system: sys,
-    prompt,
-    temperature: 0.2,
-  });
-
-  return res;
-};
+    };
 
 
     let result: Awaited<ReturnType<typeof attempt>> | null = null;
