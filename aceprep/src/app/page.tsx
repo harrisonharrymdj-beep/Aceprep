@@ -1,312 +1,806 @@
-// app/page.tsx
+// src/app/page.tsx
+"use client";
+
 import Link from "next/link";
-import { Check, Code2, Sparkles, Zap, Shield, BookOpen, ArrowRight, Star } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ArrowRight,
+  BadgeCheck,
+  BookOpen,
+  Clipboard,
+  Code2,
+  Crown,
+  FileDown,
+  Loader2,
+  Lock,
+  Shield,
+  Sparkles,
+  Timer,
+} from "lucide-react";
+
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 
+type Tool =
+  | "study_guide"
+  | "formula_sheet"
+  | "flashcards"
+  | "planner"
+  | "reviewer"
+  | "essay_outline"
+  | "essay_proofread";
+
+type Tier = "free" | "pro";
+
+const BRAND_LINE = "Study smarter. Learn honestly.";
+
+const TOOLS: Array<{
+  id: Tool;
+  label: string;
+  short: string;
+  heavy: boolean;
+  needs: {
+    materials?: boolean;
+    course?: boolean;
+    topic?: boolean;
+    examDate?: boolean;
+    userAnswer?: boolean;
+    answerKey?: boolean;
+  };
+}> = [
+  {
+    id: "study_guide",
+    label: "Study Guide Maker",
+    short: "Study Guide",
+    heavy: true,
+    needs: { materials: true, course: true, topic: true },
+  },
+  {
+    id: "formula_sheet",
+    label: "Formula Sheet Builder",
+    short: "Formula Sheet",
+    heavy: true,
+    needs: { materials: true, course: true, topic: true },
+  },
+  {
+    id: "reviewer",
+    label: "Homework/Quiz Reviewer",
+    short: "Reviewer",
+    heavy: true,
+    needs: { materials: true, course: true, topic: true, userAnswer: true, answerKey: true },
+  },
+  {
+    id: "flashcards",
+    label: "Flashcards",
+    short: "Flashcards",
+    heavy: false,
+    needs: { materials: true, course: true, topic: true },
+  },
+  {
+    id: "planner",
+    label: "Study Week Planner",
+    short: "Planner",
+    heavy: false,
+    needs: { materials: true, course: true, topic: true, examDate: true },
+  },
+  {
+    id: "essay_outline",
+    label: "Essay Outliner",
+    short: "Outline",
+    heavy: true,
+    needs: { materials: true, course: true, topic: true },
+  },
+  {
+    id: "essay_proofread",
+    label: "Essay Proofreader",
+    short: "Proofread",
+    heavy: true,
+    needs: { materials: true, course: true, topic: true, userAnswer: true }, // reuse userAnswer as "essay text"
+  },
+];
+
+const DEFAULT_TOOL: Tool = "study_guide";
+
+const AD_SECONDS = 15;
+
+function cn(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+function isBrowser() {
+  return typeof window !== "undefined";
+}
+
+function makeSessionId() {
+  // not crypto-perfect; fine for MVP.
+  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
+
 export default function Page() {
+  const [selectedTool, setSelectedTool] = useState<Tool>(DEFAULT_TOOL);
+  const [tier, setTier] = useState<Tier>("free");
+
+  const [course, setCourse] = useState("");
+  const [topic, setTopic] = useState("");
+  const [materials, setMaterials] = useState("");
+  const [examDate, setExamDate] = useState(""); // YYYY-MM-DD
+  const [userAnswer, setUserAnswer] = useState("");
+  const [answerKey, setAnswerKey] = useState("");
+
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [apiResult, setApiResult] = useState<any | null>(null);
+  const [policyRefused, setPolicyRefused] = useState<{ refused: boolean; reason: string | null } | null>(null);
+
+  const [showAdOverlay, setShowAdOverlay] = useState(false);
+  const [adRemaining, setAdRemaining] = useState(0);
+
+  const [cooldownRemaining, setCooldownRemaining] = useState(0);
+  const cooldownTimerRef = useRef<number | null>(null);
+  const adTimerRef = useRef<number | null>(null);
+
+  const [limits, setLimits] = useState<{ remainingToday: number; cooldownSeconds: number } | null>(null);
+  const [modelUsed, setModelUsed] = useState<string | null>(null);
+
+  const toolMeta = useMemo(() => TOOLS.find((t) => t.id === selectedTool)!, [selectedTool]);
+  const isHeavyTool = toolMeta.heavy;
+  const needsVideoAd = tier === "free" && isHeavyTool;
+
+  const canGenerate = useMemo(() => {
+    if (cooldownRemaining > 0) return false;
+    if (isGenerating) return false;
+
+    // Required inputs
+    if (toolMeta.needs.materials && materials.trim().length === 0) return false;
+
+    if (selectedTool === "planner" && examDate.trim().length === 0) return false;
+
+    if (selectedTool === "reviewer" && userAnswer.trim().length === 0) return false;
+    // answerKey is optional in backend schema; keep it optional here too.
+    // but show field.
+    return true;
+  }, [cooldownRemaining, isGenerating, toolMeta.needs.materials, materials, selectedTool, examDate, userAnswer]);
+
+  // Create/keep a sessionId for MVP
+  const sessionId = useMemo(() => {
+    if (!isBrowser()) return "server";
+    const key = "aceprep_sessionId";
+    const existing = window.localStorage.getItem(key);
+    if (existing && existing.length >= 8) return existing;
+    const created = makeSessionId();
+    window.localStorage.setItem(key, created);
+    return created;
+  }, []);
+
+  // Cleanup intervals on unmount
+  useEffect(() => {
+    return () => {
+      if (adTimerRef.current) window.clearInterval(adTimerRef.current);
+      if (cooldownTimerRef.current) window.clearInterval(cooldownTimerRef.current);
+    };
+  }, []);
+
+  function startAdCountdown() {
+    setShowAdOverlay(true);
+    setAdRemaining(AD_SECONDS);
+
+    if (adTimerRef.current) window.clearInterval(adTimerRef.current);
+    adTimerRef.current = window.setInterval(() => {
+      setAdRemaining((s) => {
+        const next = Math.max(0, s - 1);
+        if (next === 0) {
+          if (adTimerRef.current) window.clearInterval(adTimerRef.current);
+          adTimerRef.current = null;
+          setShowAdOverlay(false);
+        }
+        return next;
+      });
+    }, 1000);
+  }
+
+  function startCooldown(seconds: number) {
+    if (seconds <= 0) return;
+    setCooldownRemaining(seconds);
+
+    if (cooldownTimerRef.current) window.clearInterval(cooldownTimerRef.current);
+    cooldownTimerRef.current = window.setInterval(() => {
+      setCooldownRemaining((s) => {
+        const next = Math.max(0, s - 1);
+        if (next === 0) {
+          if (cooldownTimerRef.current) window.clearInterval(cooldownTimerRef.current);
+          cooldownTimerRef.current = null;
+        }
+        return next;
+      });
+    }, 1000);
+  }
+
+  async function onGenerate() {
+    setError(null);
+    setApiResult(null);
+    setPolicyRefused(null);
+    setModelUsed(null);
+    setLimits(null);
+
+    // Start ad overlay immediately (but DO NOT wait to fire API)
+    if (needsVideoAd) startAdCountdown();
+
+    setIsGenerating(true);
+
+    const payload = {
+      tool: selectedTool,
+      tier,
+      input: {
+        topic: topic.trim() || undefined,
+        course: course.trim() || undefined,
+        materials: materials,
+        userAnswer: userAnswer.trim() || undefined,
+        answerKey: answerKey.trim() || undefined,
+        constraints:
+          selectedTool === "planner" && examDate.trim()
+            ? { examDate: examDate.trim(), style: tier === "free" ? "concise" : "detailed" }
+            : { style: tier === "free" ? "concise" : "detailed" },
+      },
+      meta: {
+        sessionId,
+        clientTs: Date.now(),
+      },
+    };
+
+    try {
+      const res = await fetch("/api/aceprep", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const json = await res.json();
+
+      if (!res.ok || json?.ok === false) {
+        const msg =
+          json?.error ||
+          json?.message ||
+          (res.status === 429 ? "You’re sending requests too fast. Please slow down." : "Something went wrong.");
+        setError(msg);
+        setIsGenerating(false);
+        return;
+      }
+
+      setModelUsed(json.modelUsed ?? null);
+      setLimits(json.limits ?? null);
+
+      // cooldown support
+      const cd = Number(json?.limits?.cooldownSeconds ?? 0);
+      if (cd > 0) startCooldown(cd);
+
+      // policy refusal support
+      const refused = !!json?.policy?.refused;
+      const reason = (json?.policy?.reason ?? null) as string | null;
+      setPolicyRefused({ refused, reason });
+
+      // Hold output until BOTH:
+      // - API returned
+      // - Ad finished (if free heavy)
+      if (needsVideoAd) {
+        // If ad already finished, show immediately
+        if (adRemaining === 0) {
+          setApiResult(json);
+          setIsGenerating(false);
+          return;
+        }
+
+        // Otherwise, wait for ad to finish
+        const waitForAd = () =>
+          new Promise<void>((resolve) => {
+            const t = window.setInterval(() => {
+              if (adRemaining === 0) {
+                window.clearInterval(t);
+                resolve();
+              }
+            }, 250);
+          });
+
+        await waitForAd();
+      }
+
+      setApiResult(json);
+      setIsGenerating(false);
+    } catch {
+      setError("Network error. Please retry.");
+      setIsGenerating(false);
+    }
+  }
+
+  async function copyOutput() {
+    try {
+      const text = apiResult?.data ? JSON.stringify(apiResult.data, null, 2) : "";
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // ignore
+    }
+  }
+
+  const showStationaryAds = true; // MVP
+  const showGeneratingOverlay = isGenerating && needsVideoAd; // ad overlay handles generating state too
+
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <SiteHeader />
+      <StickyHeader tier={tier} setTier={setTier} />
 
       {/* Hero */}
-      <section className="mx-auto max-w-6xl px-4 pt-16 pb-10 sm:pt-20">
+      <section className="mx-auto max-w-6xl px-4 pt-14 pb-8 sm:pt-18">
         <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
           <div className="space-y-6">
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="secondary" className="rounded-full px-3 py-1">
                 <Sparkles className="mr-1 h-3.5 w-3.5" />
-                AcePrep — coding interview prep that actually sticks
+                AcePrep
               </Badge>
               <Badge variant="outline" className="rounded-full px-3 py-1">
                 <Shield className="mr-1 h-3.5 w-3.5" />
-                Built for focus
+                {BRAND_LINE}
               </Badge>
             </div>
 
             <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
-              Practice smart. Get hired faster.
+              Smarter studying for STEM students — without cheating
             </h1>
 
             <p className="text-lg text-muted-foreground">
-              AcePrep turns messy LeetCode grinding into a clear plan: personalized drills, spaced repetition,
-              and feedback that tells you exactly what to fix—so your next interview feels familiar.
+              Turn notes, slides, and formulas into structured study guides with ethical guardrails.
             </p>
 
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Button asChild size="lg" className="rounded-2xl">
-                <Link href="/app">
-                  Start prepping <ArrowRight className="ml-2 h-4 w-4" />
-                </Link>
+              <Button
+                size="lg"
+                className="rounded-2xl"
+                onClick={() => document.getElementById("tools")?.scrollIntoView({ behavior: "smooth" })}
+              >
+                Get started free <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
-              <Button asChild variant="outline" size="lg" className="rounded-2xl">
-                <Link href="#pricing">View pricing</Link>
+              <Button
+                variant="outline"
+                size="lg"
+                className="rounded-2xl"
+                onClick={() => document.getElementById("how")?.scrollIntoView({ behavior: "smooth" })}
+              >
+                See how it works
               </Button>
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <div className="flex items-center">
-                  {Array.from({ length: 5 }).map((_, i) => (
-                    <Star key={i} className="h-4 w-4" />
-                  ))}
-                </div>
-                <span>Built for serious students</span>
-              </div>
             </div>
 
-            <div className="flex flex-wrap gap-3 pt-2 text-sm text-muted-foreground">
+            <div className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
               <div className="flex items-center gap-2">
-                <Zap className="h-4 w-4" />
-                Daily plan in 60 seconds
-              </div>
-              <div className="flex items-center gap-2">
-                <Code2 className="h-4 w-4" />
-                DSA + system design
+                <BadgeCheck className="h-4 w-4" />
+                Ethical AI guardrails
               </div>
               <div className="flex items-center gap-2">
                 <BookOpen className="h-4 w-4" />
-                Study mode + mock mode
+                Transparent model use
+              </div>
+              <div className="flex items-center gap-2">
+                <Shield className="h-4 w-4" />
+                No answer dumping
               </div>
             </div>
           </div>
 
-          <HeroPreview />
+          {/* Right hero card */}
+          <Card className="rounded-3xl">
+            <CardHeader>
+              <CardTitle className="text-base">What you’ll get</CardTitle>
+              <CardDescription>Structured output designed for active recall.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <MiniRow title="Core Concepts + common pitfalls" />
+              <MiniRow title="Practice questions (no answers)" />
+              <MiniRow title="Study order + recall prompts" />
+              <Separator />
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span>Free: ads on heavy tools</span>
+                <span>Pro: ad-free + exports</span>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       </section>
 
-      {/* Logos / Social proof strip */}
-      <section className="mx-auto max-w-6xl px-4 pb-8">
+      {/* Tool Panel + Ads */}
+      <section id="tools" className="mx-auto max-w-6xl px-4 pb-10">
+        <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
+          {/* Main tool card */}
+          <Card className="rounded-3xl">
+            <CardHeader className="space-y-2">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <CardTitle className="text-xl">Try it now</CardTitle>
+                  <CardDescription>Pick a tool, paste your materials, and generate.</CardDescription>
+                </div>
+
+                {/* Tier toggle (MVP) */}
+                <div className="flex items-center gap-2">
+                  <Badge variant={tier === "free" ? "secondary" : "outline"} className="rounded-full px-3 py-1">
+                    {tier === "free" ? "Free" : "Pro"}
+                  </Badge>
+                  <div className="flex gap-1 rounded-2xl border p-1">
+                    <Button
+                      size="sm"
+                      variant={tier === "free" ? "default" : "ghost"}
+                      className="rounded-xl"
+                      onClick={() => setTier("free")}
+                    >
+                      Free
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={tier === "pro" ? "default" : "ghost"}
+                      className="rounded-xl"
+                      onClick={() => setTier("pro")}
+                    >
+                      Pro
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <ToolTabs selected={selectedTool} onSelect={setSelectedTool} />
+            </CardHeader>
+
+            <CardContent className="space-y-6">
+              {/* Inputs */}
+              <div className="grid gap-4">
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Materials</label>
+                  <textarea
+                    className="min-h-[180px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                    placeholder="Paste lecture notes, slides text, or a problem description…"
+                    value={materials}
+                    onChange={(e) => setMaterials(e.target.value)}
+                  />
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>Tip: paste raw text from slides/notes for best results.</span>
+                    {modelUsed ? (
+                      <span className="rounded-full border px-2 py-0.5">Model: {modelUsed}</span>
+                    ) : (
+                      <span className="rounded-full border px-2 py-0.5">Model: (shown after generate)</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="Course (optional)" value={course} onChange={setCourse} placeholder="ECE 201 — Digital Logic" />
+                  <Field label="Topic (optional)" value={topic} onChange={setTopic} placeholder="K-maps, FFs, FSMs…" />
+                </div>
+
+                {selectedTool === "planner" ? (
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field
+                      label="Exam date (required)"
+                      value={examDate}
+                      onChange={setExamDate}
+                      placeholder="YYYY-MM-DD"
+                      type="date"
+                    />
+                    <div className="rounded-2xl border p-3 text-sm text-muted-foreground">
+                      <p className="font-medium text-foreground">MVP note</p>
+                      <p className="mt-1">
+                        Time blocks upload comes later. For now, we’ll build a week plan from your materials + date.
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
+
+                {selectedTool === "reviewer" ? (
+                  <div className="grid gap-4">
+                    <div className="grid gap-2">
+                      <label className="text-sm font-medium">Your answer (required)</label>
+                      <textarea
+                        className="min-h-[120px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                        placeholder="Paste what you wrote / your solution attempt…"
+                        value={userAnswer}
+                        onChange={(e) => setUserAnswer(e.target.value)}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        If you don’t provide an answer key, AcePrep will give hints/checks but won’t dump final answers.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <label className="text-sm font-medium">Answer key (optional)</label>
+                      <textarea
+                        className="min-h-[90px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                        placeholder="Paste the official solution / answer key (optional)…"
+                        value={answerKey}
+                        onChange={(e) => setAnswerKey(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                ) : null}
+
+                {selectedTool === "essay_proofread" ? (
+                  <div className="grid gap-2">
+                    <label className="text-sm font-medium">Essay text (required)</label>
+                    <textarea
+                      className="min-h-[160px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                      placeholder="Paste your essay draft…"
+                      value={userAnswer}
+                      onChange={(e) => setUserAnswer(e.target.value)}
+                    />
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Controls / Limits */}
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="secondary" className="rounded-full">
+                    Tool: {toolMeta.short}
+                  </Badge>
+                  <Badge variant={isHeavyTool ? "outline" : "secondary"} className="rounded-full">
+                    {isHeavyTool ? "Heavy tool" : "Light tool"}
+                  </Badge>
+
+                  {limits ? (
+                    <Badge variant="outline" className="rounded-full">
+                      Remaining today: {limits.remainingToday}
+                    </Badge>
+                  ) : null}
+
+                  {cooldownRemaining > 0 ? (
+                    <Badge variant="outline" className="rounded-full">
+                      <Timer className="mr-1 h-3.5 w-3.5" />
+                      Cooldown: {cooldownRemaining}s
+                    </Badge>
+                  ) : null}
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    onClick={onGenerate}
+                    disabled={!canGenerate}
+                    className="rounded-2xl"
+                    size="lg"
+                  >
+                    {isGenerating ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Generating…
+                      </>
+                    ) : tier === "free" && isHeavyTool ? (
+                      <>
+                        Generate (watch ad)
+                        <ArrowRight className="ml-2 h-4 w-4" />
+                      </>
+                    ) : (
+                      <>
+                        Generate
+                        <ArrowRight className="ml-2 h-4 w-4" />
+                      </>
+                    )}
+                  </Button>
+
+                  <Button
+                    variant="outline"
+                    className="rounded-2xl"
+                    size="lg"
+                    onClick={() => {
+                      setApiResult(null);
+                      setError(null);
+                      setPolicyRefused(null);
+                      setModelUsed(null);
+                      setLimits(null);
+                    }}
+                  >
+                    Reset
+                  </Button>
+                </div>
+              </div>
+
+              {/* Below panel ads (2 horizontal slots) */}
+              {showStationaryAds ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+                </div>
+              ) : null}
+
+              {/* Output */}
+              <div id="how" className="space-y-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold">Output</h3>
+                    <p className="text-sm text-muted-foreground">
+                      Structured sections. Copy is free; exports are Pro.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" className="rounded-2xl" onClick={copyOutput} disabled={!apiResult?.data}>
+                      <Clipboard className="mr-2 h-4 w-4" />
+                      Copy
+                    </Button>
+
+                    <ExportButtons tier={tier} enabled={!!apiResult?.data} />
+                  </div>
+                </div>
+
+                {error ? <ErrorCard message={error} onRetry={canGenerate ? onGenerate : undefined} /> : null}
+
+                {isGenerating && !apiResult ? <SkeletonOutput /> : null}
+
+                {apiResult?.policy?.refused ? (
+                  <RefusalCard reason={apiResult?.policy?.reason ?? null} selectedTool={selectedTool} />
+                ) : null}
+
+                {apiResult?.data && !apiResult?.policy?.refused ? (
+                  <OutputRenderer tool={selectedTool} data={apiResult.data} />
+                ) : null}
+
+                {!apiResult && !isGenerating && !error ? (
+                  <Card className="rounded-3xl">
+                    <CardContent className="p-6 text-sm text-muted-foreground">
+                      Paste your materials above and click <span className="font-medium text-foreground">Generate</span>.
+                      <div className="mt-2 text-xs">
+                        {tier === "free" && isHeavyTool ? "Free heavy tools show a short ad during generation." : "Pro is ad-free."}
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Right sidebar ads (2) */}
+          <div className="space-y-6">
+            <Card className="rounded-3xl">
+              <CardHeader>
+                <CardTitle className="text-base">Upgrade</CardTitle>
+                <CardDescription>No ads, higher limits, exports.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center gap-2 text-sm">
+                  <Crown className="h-4 w-4" />
+                  Pro: $6.99/mo (recommended)
+                </div>
+                <Button className="w-full rounded-2xl" asChild>
+                  <Link href="#pricing">Go Pro</Link>
+                </Button>
+                <p className="text-xs text-muted-foreground">{BRAND_LINE}</p>
+              </CardContent>
+            </Card>
+
+            {showStationaryAds ? (
+              <>
+                <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+                <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+              </>
+            ) : null}
+          </div>
+        </div>
+      </section>
+
+      {/* Ethics */}
+      <section id="ethics" className="mx-auto max-w-6xl px-4 pb-12">
         <Card className="rounded-3xl">
-          <CardContent className="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
-              <p className="text-sm font-medium">What you get</p>
-              <p className="text-sm text-muted-foreground">
-                Structured prep, measurable progress, and fewer “I blanked” moments.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="secondary" className="rounded-full px-3 py-1">
-                Daily plan
-              </Badge>
-              <Badge variant="secondary" className="rounded-full px-3 py-1">
-                Weakness tracking
-              </Badge>
-              <Badge variant="secondary" className="rounded-full px-3 py-1">
-                Spaced repetition
-              </Badge>
-              <Badge variant="secondary" className="rounded-full px-3 py-1">
-                Mock interviews
-              </Badge>
-            </div>
+          <CardHeader>
+            <CardTitle className="text-2xl">Built ethically. On purpose.</CardTitle>
+            <CardDescription>Designed for learning — not shortcuts.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-6 md:grid-cols-2">
+            <ul className="space-y-3 text-sm">
+              <li className="flex items-start gap-2">
+                <Shield className="mt-0.5 h-4 w-4" />
+                <span>
+                  <span className="font-medium">No cheating / no answer dumping.</span> We help you understand and practice.
+                </span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Shield className="mt-0.5 h-4 w-4" />
+                <span>
+                  <span className="font-medium">No hate, harassment, or illegal content.</span> Guardrails stay on.
+                </span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Shield className="mt-0.5 h-4 w-4" />
+                <span>
+                  <span className="font-medium">Transparent AI usage.</span> We show model used in the response metadata.
+                </span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Shield className="mt-0.5 h-4 w-4" />
+                <span>
+                  <span className="font-medium">Designed for learning.</span> Active recall, ordering, and practice prompts.
+                </span>
+              </li>
+            </ul>
+
+            <Card className="rounded-3xl">
+              <CardHeader>
+                <CardTitle className="text-base">Ad-free studying</CardTitle>
+                <CardDescription>Remove the 15s overlay and unlock exports.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <Button className="w-full rounded-2xl" asChild>
+                  <Link href="#pricing">Upgrade to Pro</Link>
+                </Button>
+                <p className="text-xs text-muted-foreground">Free tier is supported by ads on heavy tools.</p>
+              </CardContent>
+            </Card>
           </CardContent>
         </Card>
-      </section>
-
-      {/* Features */}
-      <section id="features" className="mx-auto max-w-6xl px-4 py-12">
-        <div className="mb-8 space-y-2">
-          <h2 className="text-3xl font-semibold tracking-tight">Everything you need to prep with confidence</h2>
-          <p className="text-muted-foreground">
-            Simple on the surface. Deep where it matters: patterns, recall, and execution.
-          </p>
-        </div>
-
-        <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-          <FeatureCard
-            icon={<Zap className="h-5 w-5" />}
-            title="Daily plan that adapts"
-            desc="Answer a quick check-in; AcePrep generates the most impactful next set."
-          />
-          <FeatureCard
-            icon={<Sparkles className="h-5 w-5" />}
-            title="Spaced repetition, automated"
-            desc="Bring back old problems at the right time so you retain patterns."
-          />
-          <FeatureCard
-            icon={<Code2 className="h-5 w-5" />}
-            title="Solution feedback"
-            desc="Get pinpoint guidance on complexity, edge cases, and cleaner approaches."
-          />
-          <FeatureCard
-            icon={<BookOpen className="h-5 w-5" />}
-            title="Study mode + mock mode"
-            desc="Learn with hints, then switch to timed mocks with debriefs."
-          />
-          <FeatureCard
-            icon={<Shield className="h-5 w-5" />}
-            title="Progress you can trust"
-            desc="Track mastery by topic, not just “problems solved.”"
-          />
-          <FeatureCard
-            icon={<ArrowRight className="h-5 w-5" />}
-            title="Interview-ready roadmap"
-            desc="Weeks 1–2 fundamentals, weeks 3–4 patterns, weeks 5–6 mocks—adjusted to you."
-          />
-        </div>
       </section>
 
       {/* Pricing */}
-      <section id="pricing" className="mx-auto max-w-6xl px-4 py-12">
-        <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div className="space-y-2">
-            <h2 className="text-3xl font-semibold tracking-tight">Pricing</h2>
-            <p className="text-muted-foreground">Pick the plan that matches your timeline.</p>
-          </div>
-          <div className="text-sm text-muted-foreground">
-            Cancel anytime. Upgrade/downgrade anytime.
-          </div>
+      <section id="pricing" className="mx-auto max-w-6xl px-4 pb-16">
+        <div className="mb-6 space-y-2">
+          <h2 className="text-3xl font-semibold tracking-tight">Pricing</h2>
+          <p className="text-muted-foreground">Simple, student-friendly.</p>
         </div>
 
-        <div className="grid gap-5 lg:grid-cols-3">
+        <div className="grid gap-5 lg:grid-cols-2">
           <PricingCard
-            name="Starter"
-            price="$19"
-            cadence="/mo"
-            blurb="For consistent practice and steady improvement."
-            cta={{ label: "Start Starter", href: "/checkout?plan=starter" }}
-            features={[
-              "Personalized daily plan",
-              "Topic mastery tracking",
-              "Spaced repetition reviews",
-              "Core DSA library",
+            title="Free"
+            price="$0"
+            subtitle="Ads supported"
+            bullets={[
+              "Core tools",
+              "Heavy tools: ads during generation",
+              "10 heavy generations/day",
+              "Copy output",
+              "Limited history (MVP)",
             ]}
+            ctaLabel="Keep using Free"
+            ctaHref="#tools"
+            variant="outline"
           />
 
           <PricingCard
+            title="Pro"
+            price="$6.99/mo"
+            subtitle="Ad-free + exports"
+            bullets={[
+              "No ads",
+              "Higher limits",
+              "Faster feel (UX)",
+              "Saved Study Caves (MVP stub)",
+              "Exports: PDF / Notion / Anki CSV (MVP stub)",
+            ]}
+            ctaLabel="Go Pro"
+            ctaHref="/checkout?plan=pro"
+            variant="default"
             highlight
-            name="Pro"
-            price="$39"
-            cadence="/mo"
-            blurb="Best for interview season: drills + mocks + deeper feedback."
-            cta={{ label: "Start Pro", href: "/checkout?plan=pro" }}
-            features={[
-              "Everything in Starter",
-              "Timed mock interviews",
-              "Deeper solution feedback",
-              "Company-style problem sets",
-              "System design prompts",
-            ]}
-            badge="Most popular"
-          />
-
-          <PricingCard
-            name="Team"
-            price="$99"
-            cadence="/mo"
-            blurb="For clubs, cohorts, and friend groups prepping together."
-            cta={{ label: "Start Team", href: "/checkout?plan=team" }}
-            features={[
-              "Up to 5 seats",
-              "Shared progress dashboard",
-              "Weekly challenge packs",
-              "Admin controls",
-            ]}
           />
         </div>
-      </section>
 
-      {/* Testimonials */}
-      <section className="mx-auto max-w-6xl px-4 py-12">
-        <div className="mb-8 space-y-2">
-          <h2 className="text-3xl font-semibold tracking-tight">Results-focused</h2>
-          <p className="text-muted-foreground">Less grinding. More signal.</p>
-        </div>
-
-        <div className="grid gap-5 md:grid-cols-3">
-          <Testimonial
-            quote="The daily plan removed decision fatigue. I stopped jumping around and finally got consistent."
-            name="Student"
-            meta="CS junior"
-          />
-          <Testimonial
-            quote="The reviews hit at the perfect time. Stuff I used to forget stayed locked in."
-            name="New Grad"
-            meta="Interviewing"
-          />
-          <Testimonial
-            quote="Mock mode + debriefs made the real thing feel normal. Huge confidence boost."
-            name="Career Switcher"
-            meta="Bootcamp grad"
-          />
-        </div>
-      </section>
-
-      {/* FAQ */}
-      <section id="faq" className="mx-auto max-w-6xl px-4 py-12">
-        <div className="mb-8 space-y-2">
-          <h2 className="text-3xl font-semibold tracking-tight">FAQ</h2>
-          <p className="text-muted-foreground">Quick answers to common questions.</p>
-        </div>
-
-        <Card className="rounded-3xl">
-          <CardContent className="p-2 sm:p-4">
-            <Accordion type="single" collapsible className="w-full">
-              <AccordionItem value="item-1">
-                <AccordionTrigger className="px-3">How is this different from LeetCode?</AccordionTrigger>
-                <AccordionContent className="px-3 text-muted-foreground">
-                  AcePrep focuses on planning, recall, and execution. You get an adaptive plan, spaced repetition,
-                  and feedback loops—so you improve faster than random problem-hopping.
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem value="item-2">
-                <AccordionTrigger className="px-3">Do I need to be advanced?</AccordionTrigger>
-                <AccordionContent className="px-3 text-muted-foreground">
-                  Nope. The plan adapts to your level. Beginners build foundations; advanced users sharpen patterns and mocks.
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem value="item-3">
-                <AccordionTrigger className="px-3">Can I cancel anytime?</AccordionTrigger>
-                <AccordionContent className="px-3 text-muted-foreground">
-                  Yes—cancel whenever. You’ll keep access until the end of your billing period.
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem value="item-4">
-                <AccordionTrigger className="px-3">What languages are supported?</AccordionTrigger>
-                <AccordionContent className="px-3 text-muted-foreground">
-                  Start with your main interview language (Python/Java/C++/JavaScript). The platform is designed to expand,
-                  but your plan and mocks should match the language you’ll interview in.
-                </AccordionContent>
-              </AccordionItem>
-            </Accordion>
-          </CardContent>
-        </Card>
-      </section>
-
-      {/* CTA */}
-      <section className="mx-auto max-w-6xl px-4 pb-16 pt-6">
-        <Card className="rounded-3xl">
-          <CardContent className="flex flex-col gap-6 p-8 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-2">
-              <h3 className="text-2xl font-semibold tracking-tight">Ready to start?</h3>
-              <p className="text-muted-foreground">
-                Get your plan, do today’s set, and keep building momentum.
-              </p>
-            </div>
-            <div className="flex flex-col gap-3 sm:flex-row">
-              <Button asChild size="lg" className="rounded-2xl">
-                <Link href="/app">
-                  Start now <ArrowRight className="ml-2 h-4 w-4" />
-                </Link>
-              </Button>
-              <Button asChild variant="outline" size="lg" className="rounded-2xl">
-                <Link href="#pricing">See plans</Link>
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+        {/* Footer ads (2) */}
+        {showStationaryAds ? (
+          <div className="mt-8 grid gap-3 sm:grid-cols-2">
+            <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+            <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+          </div>
+        ) : null}
 
         <Footer />
       </section>
+
+      {/* Video ad overlay */}
+      {showGeneratingOverlay || showAdOverlay ? (
+        <AdOverlay
+          remaining={adRemaining}
+          showAlmostDone={isGenerating && !!apiResult === false && adRemaining === 0}
+        />
+      ) : null}
     </main>
   );
 }
 
-function SiteHeader() {
+/* -----------------------------
+   Header
+----------------------------- */
+
+function StickyHeader({ tier, setTier }: { tier: Tier; setTier: (t: Tier) => void }) {
   return (
     <header className="sticky top-0 z-40 border-b bg-background/70 backdrop-blur">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
@@ -318,23 +812,28 @@ function SiteHeader() {
         </Link>
 
         <nav className="hidden items-center gap-6 sm:flex">
-          <Link href="#features" className="text-sm text-muted-foreground hover:text-foreground">
-            Features
-          </Link>
-          <Link href="#pricing" className="text-sm text-muted-foreground hover:text-foreground">
+          <a href="#tools" className="text-sm text-muted-foreground hover:text-foreground">
+            Tools
+          </a>
+          <a href="#ethics" className="text-sm text-muted-foreground hover:text-foreground">
+            Ethics
+          </a>
+          <a href="#pricing" className="text-sm text-muted-foreground hover:text-foreground">
             Pricing
-          </Link>
-          <Link href="#faq" className="text-sm text-muted-foreground hover:text-foreground">
-            FAQ
-          </Link>
+          </a>
         </nav>
 
         <div className="flex items-center gap-2">
-          <Button asChild variant="ghost" className="rounded-2xl">
-            <Link href="/login">Log in</Link>
+          <Button
+            variant={tier === "pro" ? "default" : "outline"}
+            className="rounded-2xl"
+            onClick={() => setTier("pro")}
+          >
+            <Crown className="mr-2 h-4 w-4" />
+            Upgrade
           </Button>
-          <Button asChild className="rounded-2xl">
-            <Link href="/app">Get started</Link>
+          <Button variant="ghost" className="rounded-2xl" asChild>
+            <Link href="/login">Sign in</Link>
           </Button>
         </div>
       </div>
@@ -342,141 +841,729 @@ function SiteHeader() {
   );
 }
 
-function HeroPreview() {
+/* -----------------------------
+   Tool selector
+----------------------------- */
+
+function ToolTabs({ selected, onSelect }: { selected: Tool; onSelect: (t: Tool) => void }) {
+  return (
+    <div className="flex flex-wrap gap-2 pt-1">
+      {TOOLS.map((t) => (
+        <button
+          key={t.id}
+          onClick={() => onSelect(t.id)}
+          className={cn(
+            "rounded-full border px-3 py-1 text-xs transition",
+            selected === t.id ? "bg-foreground text-background" : "bg-background text-foreground hover:bg-muted"
+          )}
+        >
+          {t.label}
+          {t.heavy ? <span className="ml-2 opacity-80">(heavy)</span> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* -----------------------------
+   Small UI pieces
+----------------------------- */
+
+function Field({
+  label,
+  value,
+  onChange,
+  placeholder,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  type?: string;
+}) {
+  return (
+    <div className="grid gap-2">
+      <label className="text-sm font-medium">{label}</label>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="h-10 w-full rounded-2xl border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+      />
+    </div>
+  );
+}
+
+function MiniRow({ title }: { title: string }) {
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <BadgeCheck className="h-4 w-4" />
+      <span className="text-muted-foreground">{title}</span>
+    </div>
+  );
+}
+
+function StationaryAdSlot({ title, subtitle, tall }: { title: string; subtitle: string; tall?: boolean }) {
+  return (
+    <div className={cn("rounded-3xl border p-4", tall ? "min-h-[220px]" : "min-h-[110px]")}>
+      <div className="flex items-center justify-between">
+        <Badge variant="outline" className="rounded-full">
+          Ad
+        </Badge>
+        <span className="text-xs text-muted-foreground">{subtitle}</span>
+      </div>
+      <div className="mt-3 space-y-2">
+        <p className="text-sm font-medium">{title}</p>
+        <p className="text-xs text-muted-foreground">
+          Static placement (no animation). Replace with your ad network later.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function SkeletonOutput() {
   return (
     <Card className="rounded-3xl">
-      <CardHeader>
-        <CardTitle className="text-base">Your prep dashboard</CardTitle>
-        <CardDescription>Today’s plan, progress, and next-best actions.</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <MiniStat label="Today" value="3 tasks" hint="~45–60 min" />
-          <MiniStat label="Streak" value="7 days" hint="Consistency wins" />
+      <CardContent className="p-6">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Generating your study material…
         </div>
-
-        <div className="rounded-3xl border p-4">
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-medium">Today’s set</p>
-            <Badge variant="secondary" className="rounded-full">
-              Adaptive
-            </Badge>
-          </div>
-          <div className="mt-3 space-y-3">
-            <TaskRow title="2-pointer pattern drill" meta="Arrays • Medium • 12–15 min" />
-            <TaskRow title="Binary search variants" meta="Search • Mixed • 15–20 min" />
-            <TaskRow title="Timed mock (mini)" meta="Mock • 1 question • 15 min" />
-          </div>
-          <Separator className="my-4" />
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-muted-foreground">Next review: “Top K Elements” in 2 days</p>
-            <Button asChild size="sm" className="rounded-2xl">
-              <Link href="/app">
-                Start now <ArrowRight className="ml-2 h-4 w-4" />
-              </Link>
-            </Button>
-
-          </div>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Chip label="Weakness" value="Graphs" />
-          <Chip label="Strong" value="Sliding Window" />
-          <Chip label="Focus" value="DP basics" />
+        <div className="mt-4 space-y-3">
+          <div className="h-4 w-3/4 rounded bg-muted" />
+          <div className="h-4 w-5/6 rounded bg-muted" />
+          <div className="h-4 w-2/3 rounded bg-muted" />
+          <div className="h-24 w-full rounded bg-muted" />
         </div>
       </CardContent>
     </Card>
   );
 }
 
-function MiniStat({ label, value, hint }: { label: string; value: string; hint: string }) {
+function ErrorCard({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <div className="rounded-3xl border p-4">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-1 text-xl font-semibold">{value}</p>
-      <p className="mt-1 text-xs text-muted-foreground">{hint}</p>
-    </div>
-  );
-}
-
-function TaskRow({ title, meta }: { title: string; meta: string }) {
-  return (
-    <div className="flex items-start gap-3">
-      <div className="mt-0.5 grid h-6 w-6 place-items-center rounded-2xl border">
-        <Check className="h-4 w-4" />
-      </div>
-      <div className="min-w-0">
-        <p className="text-sm font-medium">{title}</p>
-        <p className="text-xs text-muted-foreground">{meta}</p>
-      </div>
-    </div>
-  );
-}
-
-function Chip({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-3xl border p-4">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-1 text-sm font-medium">{value}</p>
-    </div>
-  );
-}
-
-function FeatureCard({ icon, title, desc }: { icon: ReactNode; title: string; desc: string }) {
-  return (
-    <Card className="rounded-3xl">
-      <CardHeader className="space-y-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-2xl border">{icon}</div>
-        <CardTitle className="text-base">{title}</CardTitle>
-        <CardDescription>{desc}</CardDescription>
-      </CardHeader>
+    <Card className="rounded-3xl border-destructive/40">
+      <CardContent className="p-6">
+        <p className="text-sm font-medium">Something went wrong</p>
+        <p className="mt-1 text-sm text-muted-foreground">{message}</p>
+        <div className="mt-4 flex gap-2">
+          {onRetry ? (
+            <Button className="rounded-2xl" onClick={onRetry}>
+              Retry
+            </Button>
+          ) : null}
+          <Button className="rounded-2xl" variant="outline" onClick={() => location.reload()}>
+            Refresh
+          </Button>
+        </div>
+      </CardContent>
     </Card>
   );
 }
 
-function PricingCard({
-  name,
-  price,
-  cadence,
-  blurb,
-  features,
-  cta,
-  highlight,
-  badge,
+function RefusalCard({ reason, selectedTool }: { reason: string | null; selectedTool: Tool }) {
+  const suggestions = [
+    "I can explain the concept step-by-step.",
+    "I can help you build a study guide from your notes.",
+    selectedTool === "reviewer" ? "Paste your answer key to verify correctness." : "Share what you’ve tried so far.",
+  ];
+
+  return (
+    <Card className="rounded-3xl border-foreground/20">
+      <CardHeader>
+        <CardTitle className="text-base">Request blocked (ethics)</CardTitle>
+        <CardDescription>{BRAND_LINE}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        <p className="text-muted-foreground">
+          Sorry — I can’t help with that request. This tool supports learning and practice, not disallowed content.
+        </p>
+        {reason ? (
+          <p className="text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">Reason:</span> {reason}
+          </p>
+        ) : null}
+        <Separator />
+        <div className="space-y-2">
+          <p className="font-medium">Try this instead:</p>
+          <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+            {suggestions.map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ul>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ExportButtons({ tier, enabled }: { tier: Tier; enabled: boolean }) {
+  const locked = tier !== "pro";
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      <Button variant="outline" className="rounded-2xl" disabled={!enabled || locked}>
+        <FileDown className="mr-2 h-4 w-4" />
+        PDF
+        {locked ? <Lock className="ml-2 h-4 w-4" /> : null}
+      </Button>
+      <Button variant="outline" className="rounded-2xl" disabled={!enabled || locked}>
+        <FileDown className="mr-2 h-4 w-4" />
+        Notion
+        {locked ? <Lock className="ml-2 h-4 w-4" /> : null}
+      </Button>
+      <Button variant="outline" className="rounded-2xl" disabled={!enabled || locked}>
+        <FileDown className="mr-2 h-4 w-4" />
+        Anki (CSV)
+        {locked ? <Lock className="ml-2 h-4 w-4" /> : null}
+      </Button>
+      {locked ? (
+        <Badge variant="secondary" className="rounded-full">
+          Pro feature
+        </Badge>
+      ) : null}
+    </div>
+  );
+}
+
+/* -----------------------------
+   Output rendering by tool
+----------------------------- */
+
+function OutputRenderer({ tool, data }: { tool: Tool; data: any }) {
+  switch (tool) {
+    case "study_guide":
+      return <StudyGuideView data={data} />;
+    case "formula_sheet":
+      return <FormulaSheetView data={data} />;
+    case "reviewer":
+      return <ReviewerView data={data} />;
+    case "flashcards":
+      return <FlashcardsView data={data} />;
+    case "planner":
+      return <PlannerView data={data} />;
+    case "essay_outline":
+      return <EssayOutlineView data={data} />;
+    case "essay_proofread":
+      return <EssayProofreadView data={data} />;
+    default:
+      return null;
+  }
+}
+
+function StudyGuideView({ data }: { data: any }) {
+  const sections = Array.isArray(data?.sections) ? data.sections : [];
+  const whatToStudyFirst = Array.isArray(data?.whatToStudyFirst) ? data.whatToStudyFirst : [];
+  const activeRecall = Array.isArray(data?.activeRecall) ? data.activeRecall : [];
+
+  return (
+    <Card className="rounded-3xl">
+      <CardHeader>
+        <CardTitle className="text-base">Study Guide</CardTitle>
+        <CardDescription>Core concepts, pitfalls, and practice prompts (no answers).</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        {whatToStudyFirst.length ? (
+          <Section title="Study Order">
+            <ol className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
+              {whatToStudyFirst.map((s: string, i: number) => (
+                <li key={`${s}-${i}`}>{s}</li>
+              ))}
+            </ol>
+          </Section>
+        ) : null}
+
+        {sections.map((sec: any, idx: number) => (
+          <Card key={idx} className="rounded-3xl">
+            <CardHeader>
+              <CardTitle className="text-base">{sec?.title ?? `Section ${idx + 1}`}</CardTitle>
+              <CardDescription>Focused learning + active recall</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <ThreeColList
+                aTitle="What to know"
+                a={sec?.whatToKnow}
+                bTitle="Key concepts"
+                b={sec?.keyConcepts}
+                cTitle="Common pitfalls"
+                c={sec?.misconceptions}
+              />
+
+              {Array.isArray(sec?.practiceQuestions) && sec.practiceQuestions.length ? (
+                <Section title="Practice Questions (no answers)">
+                  <ul className="space-y-2 text-sm text-muted-foreground">
+                    {sec.practiceQuestions.map((q: any, i: number) => (
+                      <li key={i} className="rounded-2xl border p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="font-medium text-foreground">{q?.question ?? "Question"}</span>
+                          {q?.type ? <Badge className="rounded-full">{q.type}</Badge> : null}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </Section>
+              ) : null}
+            </CardContent>
+          </Card>
+        ))}
+
+        {activeRecall.length ? (
+          <Section title="Active Recall Prompts (no answers)">
+            <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+              {activeRecall.map((s: string, i: number) => (
+                <li key={`${s}-${i}`}>{s}</li>
+              ))}
+            </ul>
+          </Section>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function FormulaSheetView({ data }: { data: any }) {
+  const topics = Array.isArray(data?.topics) ? data.topics : [];
+
+  return (
+    <Card className="rounded-3xl">
+      <CardHeader>
+        <CardTitle className="text-base">Formula Sheet</CardTitle>
+        <CardDescription>Grouped by topic, with assumptions and common mistakes.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {topics.map((t: any, i: number) => (
+          <Card key={i} className="rounded-3xl">
+            <CardHeader>
+              <CardTitle className="text-base">{t?.topic ?? `Topic ${i + 1}`}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(Array.isArray(t?.formulas) ? t.formulas : []).map((f: any, j: number) => (
+                <div key={j} className="rounded-3xl border p-4">
+                  <div className="flex flex-col gap-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-semibold">{f?.name ?? "Formula"}</p>
+                      {f?.units ? (
+                        <Badge variant="secondary" className="rounded-full">
+                          Units: {f.units}
+                        </Badge>
+                      ) : null}
+                    </div>
+                    <pre className="mt-2 overflow-x-auto rounded-2xl bg-muted p-3 text-xs">
+                      {f?.expression ?? ""}
+                    </pre>
+                  </div>
+
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <MiniBullets title="Assumptions" items={f?.assumptions} />
+                    <MiniBullets title="When to use" items={f?.whenToUse} />
+                    <MiniBullets title="Common mistakes" items={f?.commonMistakes} />
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ReviewerView({ data }: { data: any }) {
+  const checks = Array.isArray(data?.checks) ? data.checks : [];
+  const hints = Array.isArray(data?.hints) ? data.hints : [];
+  const nextSteps = Array.isArray(data?.nextSteps) ? data.nextSteps : [];
+  const finalAnswerProvided = !!data?.finalAnswerProvided;
+
+  return (
+    <Card className="rounded-3xl">
+      <CardHeader>
+        <CardTitle className="text-base">Reviewer</CardTitle>
+        <CardDescription>
+          Checks + hints + next steps.{" "}
+          <span className="font-medium">
+            {finalAnswerProvided ? "Final answers may be included (answer key provided)." : "No final answers (no key)."}
+          </span>
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        <Section title="Checks performed">
+          {checks.length ? (
+            <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+              {checks.map((s: string, i: number) => (
+                <li key={i}>{s}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground">No checks returned.</p>
+          )}
+        </Section>
+
+        <Section title="Hints">
+          {hints.length ? (
+            <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+              {hints.map((s: string, i: number) => (
+                <li key={i}>{s}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground">No hints returned.</p>
+          )}
+        </Section>
+
+        <Section title="Next steps">
+          {nextSteps.length ? (
+            <ol className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
+              {nextSteps.map((s: string, i: number) => (
+                <li key={i}>{s}</li>
+              ))}
+            </ol>
+          ) : (
+            <p className="text-sm text-muted-foreground">No next steps returned.</p>
+          )}
+        </Section>
+      </CardContent>
+    </Card>
+  );
+}
+
+function FlashcardsView({ data }: { data: any }) {
+  const cards = Array.isArray(data?.cards) ? data.cards : [];
+
+  return (
+    <Card className="rounded-3xl">
+      <CardHeader>
+        <CardTitle className="text-base">Flashcards</CardTitle>
+        <CardDescription>Front/back cards for quick review.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {cards.map((c: any, i: number) => (
+          <div key={i} className="rounded-3xl border p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Badge variant="secondary" className="rounded-full">
+                Card {i + 1}
+              </Badge>
+              {c?.difficulty ? <Badge className="rounded-full">{c.difficulty}</Badge> : null}
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              <div className="rounded-2xl bg-muted p-3">
+                <p className="text-xs text-muted-foreground">Front</p>
+                <p className="mt-1 text-sm">{c?.front ?? ""}</p>
+              </div>
+              <div className="rounded-2xl bg-muted p-3">
+                <p className="text-xs text-muted-foreground">Back</p>
+                <p className="mt-1 text-sm">{c?.back ?? ""}</p>
+              </div>
+            </div>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PlannerView({ data }: { data: any }) {
+  const weekPlan = Array.isArray(data?.weekPlan) ? data.weekPlan : [];
+  const tips = Array.isArray(data?.tips) ? data.tips : [];
+
+  return (
+    <Card className="rounded-3xl">
+      <CardHeader>
+        <CardTitle className="text-base">Study Week Planner</CardTitle>
+        <CardDescription>A week plan based on your materials and exam date.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          {weekPlan.map((d: any, i: number) => (
+            <div key={i} className="rounded-3xl border p-4">
+              <p className="text-sm font-semibold">{d?.day ?? `Day ${i + 1}`}</p>
+              <div className="mt-2 space-y-2">
+                {(Array.isArray(d?.blocks) ? d.blocks : []).map((b: any, j: number) => (
+                  <div key={j} className="rounded-2xl bg-muted p-3 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium">{b?.label ?? "Block"}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {b?.start ?? ""}–{b?.end ?? ""}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-muted-foreground">{b?.task ?? ""}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {tips.length ? (
+          <Section title="Tips">
+            <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+              {tips.map((t: string, i: number) => (
+                <li key={i}>{t}</li>
+              ))}
+            </ul>
+          </Section>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function EssayOutlineView({ data }: { data: any }) {
+  const thesisOptions = Array.isArray(data?.thesisOptions) ? data.thesisOptions : [];
+  const outline = Array.isArray(data?.outline) ? data.outline : [];
+  const counterarguments = Array.isArray(data?.counterarguments) ? data.counterarguments : [];
+  const evidenceIdeas = Array.isArray(data?.evidenceIdeas) ? data.evidenceIdeas : [];
+
+  return (
+    <Card className="rounded-3xl">
+      <CardHeader>
+        <CardTitle className="text-base">Essay Outline</CardTitle>
+        <CardDescription>Thesis options + structured outline.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {thesisOptions.length ? (
+          <Section title="Thesis options">
+            <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+              {thesisOptions.map((t: string, i: number) => (
+                <li key={i}>{t}</li>
+              ))}
+            </ul>
+          </Section>
+        ) : null}
+
+        {outline.length ? (
+          <Section title="Outline">
+            <div className="space-y-3">
+              {outline.map((s: any, i: number) => (
+                <div key={i} className="rounded-3xl border p-4">
+                  <p className="text-sm font-semibold">{s?.section ?? `Section ${i + 1}`}</p>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+                    {(Array.isArray(s?.bullets) ? s.bullets : []).map((b: string, j: number) => (
+                      <li key={j}>{b}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </Section>
+        ) : null}
+
+        {counterarguments.length ? <MiniBullets title="Counterarguments" items={counterarguments} /> : null}
+        {evidenceIdeas.length ? <MiniBullets title="Evidence ideas" items={evidenceIdeas} /> : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function EssayProofreadView({ data }: { data: any }) {
+  const summary = typeof data?.summary === "string" ? data.summary : "";
+  const issues = Array.isArray(data?.issues) ? data.issues : [];
+  const revisedExcerpt = typeof data?.revisedExcerpt === "string" ? data.revisedExcerpt : "";
+  const nextSteps = Array.isArray(data?.nextSteps) ? data.nextSteps : [];
+
+  return (
+    <Card className="rounded-3xl">
+      <CardHeader>
+        <CardTitle className="text-base">Essay Proofread</CardTitle>
+        <CardDescription>Clarity + structure + grammar notes.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {summary ? (
+          <Section title="Summary">
+            <p className="text-sm text-muted-foreground">{summary}</p>
+          </Section>
+        ) : null}
+
+        {issues.length ? (
+          <Section title="Issues">
+            <div className="space-y-2">
+              {issues.map((it: any, i: number) => (
+                <div key={i} className="rounded-3xl border p-4 text-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Badge className="rounded-full">{it?.type ?? "other"}</Badge>
+                      <Badge variant="secondary" className="rounded-full">
+                        severity: {it?.severity ?? "low"}
+                      </Badge>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-muted-foreground">{it?.note ?? ""}</p>
+                  {it?.suggestion ? (
+                    <p className="mt-2">
+                      <span className="font-medium">Suggestion:</span> {it.suggestion}
+                    </p>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </Section>
+        ) : null}
+
+        {revisedExcerpt ? (
+          <Section title="Revised excerpt (sample)">
+            <pre className="overflow-x-auto rounded-2xl bg-muted p-3 text-xs">{revisedExcerpt}</pre>
+          </Section>
+        ) : null}
+
+        {nextSteps.length ? (
+          <Section title="Next steps">
+            <ol className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
+              {nextSteps.map((s: string, i: number) => (
+                <li key={i}>{s}</li>
+              ))}
+            </ol>
+          </Section>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+/* -----------------------------
+   Generic output helpers
+----------------------------- */
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-semibold">{title}</p>
+      {children}
+    </div>
+  );
+}
+
+function MiniBullets({ title, items }: { title: string; items: any }) {
+  const arr = Array.isArray(items) ? items : [];
+  if (!arr.length) return null;
+  return (
+    <div className="rounded-3xl border p-4">
+      <p className="text-sm font-semibold">{title}</p>
+      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+        {arr.map((s: string, i: number) => (
+          <li key={i}>{s}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ThreeColList({
+  aTitle,
+  a,
+  bTitle,
+  b,
+  cTitle,
+  c,
 }: {
-  name: string;
+  aTitle: string;
+  a: any;
+  bTitle: string;
+  b: any;
+  cTitle: string;
+  c: any;
+}) {
+  const A = Array.isArray(a) ? a : [];
+  const B = Array.isArray(b) ? b : [];
+  const C = Array.isArray(c) ? c : [];
+
+  return (
+    <div className="grid gap-3 md:grid-cols-3">
+      <MiniBullets title={aTitle} items={A} />
+      <MiniBullets title={bTitle} items={B} />
+      <MiniBullets title={cTitle} items={C} />
+    </div>
+  );
+}
+
+/* -----------------------------
+   Ad overlay (15s, unskippable)
+----------------------------- */
+
+function AdOverlay({ remaining, showAlmostDone }: { remaining: number; showAlmostDone: boolean }) {
+  return (
+    <div className="fixed inset-0 z-[100] grid place-items-center bg-black/70 p-4">
+      <div className="w-full max-w-lg rounded-3xl bg-background p-6 shadow-sm">
+        <div className="flex items-center justify-between">
+          <Badge variant="outline" className="rounded-full">
+            Ad
+          </Badge>
+          <Badge className="rounded-full">
+            {remaining > 0 ? `${remaining}s` : "0s"}
+          </Badge>
+        </div>
+
+        <div className="mt-4 space-y-2">
+          <p className="text-lg font-semibold">This keeps AcePrep free.</p>
+          <p className="text-sm text-muted-foreground">
+            Your content is generating in the background. This ad is unskippable.
+          </p>
+        </div>
+
+        <div className="mt-5 rounded-3xl border p-4">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            {remaining > 0 ? "Generating…" : showAlmostDone ? "Almost done…" : "Finishing up…"}
+          </div>
+          <div className="mt-3 h-2 w-full rounded bg-muted">
+            <div
+              className="h-2 rounded bg-foreground transition-all"
+              style={{ width: `${Math.min(100, ((AD_SECONDS - remaining) / AD_SECONDS) * 100)}%` }}
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 text-xs text-muted-foreground">{BRAND_LINE}</div>
+      </div>
+    </div>
+  );
+}
+
+/* -----------------------------
+   Pricing + Footer
+----------------------------- */
+
+function PricingCard({
+  title,
+  price,
+  subtitle,
+  bullets,
+  ctaLabel,
+  ctaHref,
+  variant,
+  highlight,
+}: {
+  title: string;
   price: string;
-  cadence: string;
-  blurb: string;
-  features: string[];
-  cta: { label: string; href: string };
+  subtitle: string;
+  bullets: string[];
+  ctaLabel: string;
+  ctaHref: string;
+  variant: "default" | "outline";
   highlight?: boolean;
-  badge?: string;
 }) {
   return (
-    <Card className={`rounded-3xl ${highlight ? "border-foreground/30 shadow-sm" : ""}`}>
-      <CardHeader className="space-y-3">
+    <Card className={cn("rounded-3xl", highlight ? "border-foreground/30 shadow-sm" : "")}>
+      <CardHeader className="space-y-2">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-base">{name}</CardTitle>
-          {badge ? <Badge className="rounded-full">{badge}</Badge> : null}
+          <CardTitle className="text-base">{title}</CardTitle>
+          {title === "Pro" ? <Badge className="rounded-full">Recommended</Badge> : null}
         </div>
         <div className="flex items-baseline gap-2">
           <span className="text-4xl font-semibold tracking-tight">{price}</span>
-          <span className="text-sm text-muted-foreground">{cadence}</span>
+          <span className="text-sm text-muted-foreground">{subtitle}</span>
         </div>
-        <CardDescription>{blurb}</CardDescription>
       </CardHeader>
-
-      <CardContent className="space-y-5">
-        <Button asChild className="w-full rounded-2xl" variant={highlight ? "default" : "outline"}>
-          <Link href={cta.href}>{cta.label}</Link>
+      <CardContent className="space-y-4">
+        <Button asChild className="w-full rounded-2xl" variant={variant === "default" ? "default" : "outline"}>
+          <Link href={ctaHref}>{ctaLabel}</Link>
         </Button>
-
-        <ul className="space-y-2">
-          {features.map((f) => (
-            <li key={f} className="flex items-start gap-2 text-sm">
-              <Check className="mt-0.5 h-4 w-4" />
-              <span className="text-muted-foreground">{f}</span>
+        <ul className="space-y-2 text-sm text-muted-foreground">
+          {bullets.map((b) => (
+            <li key={b} className="flex items-start gap-2">
+              <BadgeCheck className="mt-0.5 h-4 w-4" />
+              {b}
             </li>
           ))}
         </ul>
@@ -485,45 +1572,28 @@ function PricingCard({
   );
 }
 
-function Testimonial({ quote, name, meta }: { quote: string; name: string; meta: string }) {
-  return (
-    <Card className="rounded-3xl">
-      <CardContent className="space-y-3 p-6">
-        <p className="text-sm leading-relaxed">“{quote}”</p>
-        <Separator />
-        <div className="flex items-center justify-between">
-          <p className="text-sm font-medium">{name}</p>
-          <p className="text-xs text-muted-foreground">{meta}</p>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function Footer() {
   return (
-    <footer className="mx-auto mt-10 max-w-6xl px-1">
-      <div className="flex flex-col gap-6 rounded-3xl border p-6 sm:flex-row sm:items-center sm:justify-between">
-        <div className="space-y-1">
-          <p className="text-sm font-semibold">AcePrep</p>
-          <p className="text-xs text-muted-foreground">
-            Build the habits. Master the patterns. Walk into interviews calm.
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-3 text-sm">
-          <Link href="/terms" className="text-muted-foreground hover:text-foreground">
-            Terms
-          </Link>
-          <Link href="/privacy" className="text-muted-foreground hover:text-foreground">
-            Privacy
-          </Link>
-          <Link href="/support" className="text-muted-foreground hover:text-foreground">
-            Support
-          </Link>
-        </div>
-      </div>
-
+    <footer className="mt-10">
+      <Card className="rounded-3xl">
+        <CardContent className="flex flex-col gap-6 p-6 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-1">
+            <p className="text-sm font-semibold">AcePrep</p>
+            <p className="text-xs text-muted-foreground">{BRAND_LINE}</p>
+          </div>
+          <div className="flex flex-wrap gap-3 text-sm">
+            <Link href="/terms" className="text-muted-foreground hover:text-foreground">
+              Terms
+            </Link>
+            <Link href="/privacy" className="text-muted-foreground hover:text-foreground">
+              Privacy
+            </Link>
+            <Link href="/support" className="text-muted-foreground hover:text-foreground">
+              Support
+            </Link>
+          </div>
+        </CardContent>
+      </Card>
       <p className="py-6 text-center text-xs text-muted-foreground">
         © {new Date().getFullYear()} AcePrep. All rights reserved.
       </p>
