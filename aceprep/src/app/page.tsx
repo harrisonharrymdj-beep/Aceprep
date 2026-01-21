@@ -22,7 +22,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 
 type Tool =
   | "study_guide"
@@ -331,88 +330,117 @@ export default function Page() {
     <main className="min-h-screen bg-background text-foreground">
       <StickyHeader tier={tier} setTier={setTier} />
 
-      {/* Hero */}
-      <section className="mx-auto max-w-6xl px-4 pt-14 pb-8 sm:pt-18">
-        <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
-          <div className="space-y-6">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="secondary" className="rounded-full px-3 py-1">
-                <Sparkles className="mr-1 h-3.5 w-3.5" />
-                AcePrep
-              </Badge>
-              <Badge variant="outline" className="rounded-full px-3 py-1">
-                <Shield className="mr-1 h-3.5 w-3.5" />
-                {BRAND_LINE}
-              </Badge>
-            </div>
+      <div className="mx-auto max-w-7xl px-4">
+        <div className="grid gap-6 xl:grid-cols-[220px_minmax(0,1fr)_220px]">
+          <aside className="hidden xl:flex xl:flex-col gap-4 pt-10">
+            <SideRailAds />
+          </aside>
 
-            <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
-              Smarter studying for STEM students — without cheating
-            </h1>
+          <div className="space-y-12">
+            {/* Hero */}
+            <section className="pt-14 sm:pt-18">
+              <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
+                <div className="space-y-6">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary" className="rounded-full px-3 py-1">
+                      <Sparkles className="mr-1 h-3.5 w-3.5" />
+                      AcePrep
+                    </Badge>
+                    <Badge variant="outline" className="rounded-full px-3 py-1">
+                      <Shield className="mr-1 h-3.5 w-3.5" />
+                      {BRAND_LINE}
+                    </Badge>
+                  </div>
 
-            <p className="text-lg text-muted-foreground">
-              Turn notes, slides, and formulas into structured study guides with ethical guardrails.
-            </p>
+                  <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
+                    Smarter studying for STEM students — without cheating
+                  </h1>
 
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Button
-                size="lg"
-                className="rounded-2xl"
-                onClick={() => document.getElementById("tools")?.scrollIntoView({ behavior: "smooth" })}
-              >
-                Get started free <ArrowRight className="ml-2 h-4 w-4" />
-              </Button>
-              <Button
-                variant="outline"
-                size="lg"
-                className="rounded-2xl"
-                onClick={() => document.getElementById("how")?.scrollIntoView({ behavior: "smooth" })}
-              >
-                See how it works
-              </Button>
-            </div>
+                  <p className="text-lg text-muted-foreground">
+                    Turn notes, slides, and formulas into structured study guides with ethical guardrails.
+                  </p>
 
-            <div className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
-              <div className="flex items-center gap-2">
-                <BadgeCheck className="h-4 w-4" />
-                Ethical AI guardrails
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <Button
+                      size="lg"
+                      className="rounded-2xl"
+                      onClick={() => document.getElementById("tools")?.scrollIntoView({ behavior: "smooth" })}
+                    >
+                      Start studying <ArrowRight className="ml-2 h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      className="rounded-2xl"
+                      onClick={() => document.getElementById("how")?.scrollIntoView({ behavior: "smooth" })}
+                    >
+                      See how it works
+                    </Button>
+                  </div>
+
+                  <Card className="rounded-3xl border-dashed">
+                    <CardContent className="space-y-3 p-5">
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold">Use AcePrep right now</p>
+                        <p className="text-sm text-muted-foreground">
+                          Paste your materials and generate a study guide in seconds.
+                        </p>
+                      </div>
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <Button
+                          className="rounded-2xl"
+                          onClick={() => document.getElementById("tools")?.scrollIntoView({ behavior: "smooth" })}
+                        >
+                          Continue as guest
+                        </Button>
+                        <Button variant="outline" className="rounded-2xl" asChild>
+                          <Link href="/login">Sign in</Link>
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <div className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
+                    <div className="flex items-center gap-2">
+                      <BadgeCheck className="h-4 w-4" />
+                      Ethical AI guardrails
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <BookOpen className="h-4 w-4" />
+                      Transparent model use
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Shield className="h-4 w-4" />
+                      No answer dumping
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right hero card */}
+                <Card className="rounded-3xl">
+                  <CardHeader>
+                    <CardTitle className="text-base">What you’ll get</CardTitle>
+                    <CardDescription>Structured output designed for active recall.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <MiniRow title="Core Concepts + common pitfalls" />
+                    <MiniRow title="Practice questions (no answers)" />
+                    <MiniRow title="Study order + recall prompts" />
+                    <Separator />
+                    <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+                      <span>Free tier shows ads on heavy tools.</span>
+                      <span>Ads keep AcePrep free for students.</span>
+                    </div>
+                  </CardContent>
+                </Card>
               </div>
-              <div className="flex items-center gap-2">
-                <BookOpen className="h-4 w-4" />
-                Transparent model use
-              </div>
-              <div className="flex items-center gap-2">
-                <Shield className="h-4 w-4" />
-                No answer dumping
-              </div>
-            </div>
-          </div>
+            </section>
 
-          {/* Right hero card */}
-          <Card className="rounded-3xl">
-            <CardHeader>
-              <CardTitle className="text-base">What you’ll get</CardTitle>
-              <CardDescription>Structured output designed for active recall.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <MiniRow title="Core Concepts + common pitfalls" />
-              <MiniRow title="Practice questions (no answers)" />
-              <MiniRow title="Study order + recall prompts" />
-              <Separator />
-              <div className="flex items-center justify-between text-xs text-muted-foreground">
-                <span>Free: ads on heavy tools</span>
-                <span>Pro: ad-free + exports</span>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </section>
-
-      {/* Tool Panel + Ads */}
-      <section id="tools" className="mx-auto max-w-6xl px-4 pb-10">
-        <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
-          {/* Main tool card */}
-          <Card className="rounded-3xl">
+            {/* Tool Panel + Ads */}
+            <section id="tools">
+              <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
+                {/* Main tool card */}
+                <Card className="rounded-3xl">
             <CardHeader className="space-y-2">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -652,138 +680,150 @@ export default function Page() {
             </CardContent>
           </Card>
 
-          {/* Right sidebar ads (2) */}
-          <div className="space-y-6">
-            <Card className="rounded-3xl">
-              <CardHeader>
-                <CardTitle className="text-base">Upgrade</CardTitle>
-                <CardDescription>No ads, higher limits, exports.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex items-center gap-2 text-sm">
-                  <Crown className="h-4 w-4" />
-                  Pro: $6.99/mo (recommended)
+                {/* Right sidebar ads (2) */}
+                <div className="space-y-6">
+                  <Card className="rounded-3xl">
+                    <CardHeader>
+                      <CardTitle className="text-base">Upgrade</CardTitle>
+                      <CardDescription>No ads, higher limits, exports.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <div className="flex items-center gap-2 text-sm">
+                        <Crown className="h-4 w-4" />
+                        Pro: $6.99/mo (recommended)
+                      </div>
+                      <Button className="w-full rounded-2xl" asChild>
+                        <Link href="#pricing">See Pro details</Link>
+                      </Button>
+                      <p className="text-xs text-muted-foreground">{BRAND_LINE}</p>
+                    </CardContent>
+                  </Card>
+
+                  {showStationaryAds ? (
+                    <>
+                      <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+                      <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+                    </>
+                  ) : null}
                 </div>
-                <Button className="w-full rounded-2xl" asChild>
-                  <Link href="#pricing">Go Pro</Link>
-                </Button>
-                <p className="text-xs text-muted-foreground">{BRAND_LINE}</p>
-              </CardContent>
-            </Card>
+              </div>
+            </section>
 
-            {showStationaryAds ? (
-              <>
-                <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
-                <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
-              </>
-            ) : null}
+            {/* Ethics */}
+            <section id="ethics">
+              <Card className="rounded-3xl">
+                <CardHeader>
+                  <CardTitle className="text-2xl">Built ethically. On purpose.</CardTitle>
+                  <CardDescription>Designed for learning — not shortcuts.</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-6 md:grid-cols-2">
+                  <ul className="space-y-3 text-sm">
+                    <li className="flex items-start gap-2">
+                      <Shield className="mt-0.5 h-4 w-4" />
+                      <span>
+                        <span className="font-medium">No cheating / no answer dumping.</span> We help you understand and
+                        practice.
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <Shield className="mt-0.5 h-4 w-4" />
+                      <span>
+                        <span className="font-medium">No hate, harassment, or illegal content.</span> Guardrails stay on.
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <Shield className="mt-0.5 h-4 w-4" />
+                      <span>
+                        <span className="font-medium">Transparent AI usage.</span> We show model used in the response
+                        metadata.
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <Shield className="mt-0.5 h-4 w-4" />
+                      <span>
+                        <span className="font-medium">Designed for learning.</span> Active recall, ordering, and practice
+                        prompts.
+                      </span>
+                    </li>
+                  </ul>
+
+                  <Card className="rounded-3xl">
+                    <CardHeader>
+                      <CardTitle className="text-base">Why we show ads</CardTitle>
+                      <CardDescription>Short ads keep AcePrep free for students.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <p className="text-sm text-muted-foreground">
+                        We only show ads on heavy tools so you can still generate study materials without paying.
+                      </p>
+                      <Button className="w-full rounded-2xl" asChild>
+                        <Link href="#pricing">Compare plans</Link>
+                      </Button>
+                    </CardContent>
+                  </Card>
+                </CardContent>
+              </Card>
+            </section>
+
+            {/* Pricing */}
+            <section id="pricing" className="pb-16">
+              <div className="mb-6 space-y-2">
+                <h2 className="text-3xl font-semibold tracking-tight">Pricing</h2>
+                <p className="text-muted-foreground">Simple, student-friendly.</p>
+              </div>
+
+              <div className="grid gap-5 lg:grid-cols-2">
+                <PricingCard
+                  title="Free"
+                  price="$0"
+                  subtitle="Ads supported"
+                  bullets={[
+                    "Core tools",
+                    "Heavy tools: ads during generation",
+                    "10 heavy generations/day",
+                    "Copy output",
+                    "Limited history (MVP)",
+                  ]}
+                  ctaLabel="Keep using Free"
+                  ctaHref="#tools"
+                  variant="outline"
+                />
+
+                <PricingCard
+                  title="Pro"
+                  price="$6.99/mo"
+                  subtitle="Ad-free + exports"
+                  bullets={[
+                    "No ads",
+                    "Higher limits",
+                    "Faster feel (UX)",
+                    "Saved Study Caves (MVP stub)",
+                    "Exports: PDF / Notion / Anki CSV (MVP stub)",
+                  ]}
+                  ctaLabel="Choose Pro"
+                  ctaHref="/checkout?plan=pro"
+                  variant="default"
+                  highlight
+                />
+              </div>
+
+              {/* Footer ads (2) */}
+              {showStationaryAds ? (
+                <div className="mt-8 grid gap-3 sm:grid-cols-2">
+                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+                </div>
+              ) : null}
+
+              <Footer />
+            </section>
           </div>
+
+          <aside className="hidden xl:flex xl:flex-col gap-4 pt-10">
+            <SideRailAds showUpsell />
+          </aside>
         </div>
-      </section>
-
-      {/* Ethics */}
-      <section id="ethics" className="mx-auto max-w-6xl px-4 pb-12">
-        <Card className="rounded-3xl">
-          <CardHeader>
-            <CardTitle className="text-2xl">Built ethically. On purpose.</CardTitle>
-            <CardDescription>Designed for learning — not shortcuts.</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-6 md:grid-cols-2">
-            <ul className="space-y-3 text-sm">
-              <li className="flex items-start gap-2">
-                <Shield className="mt-0.5 h-4 w-4" />
-                <span>
-                  <span className="font-medium">No cheating / no answer dumping.</span> We help you understand and practice.
-                </span>
-              </li>
-              <li className="flex items-start gap-2">
-                <Shield className="mt-0.5 h-4 w-4" />
-                <span>
-                  <span className="font-medium">No hate, harassment, or illegal content.</span> Guardrails stay on.
-                </span>
-              </li>
-              <li className="flex items-start gap-2">
-                <Shield className="mt-0.5 h-4 w-4" />
-                <span>
-                  <span className="font-medium">Transparent AI usage.</span> We show model used in the response metadata.
-                </span>
-              </li>
-              <li className="flex items-start gap-2">
-                <Shield className="mt-0.5 h-4 w-4" />
-                <span>
-                  <span className="font-medium">Designed for learning.</span> Active recall, ordering, and practice prompts.
-                </span>
-              </li>
-            </ul>
-
-            <Card className="rounded-3xl">
-              <CardHeader>
-                <CardTitle className="text-base">Ad-free studying</CardTitle>
-                <CardDescription>Remove the 15s overlay and unlock exports.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <Button className="w-full rounded-2xl" asChild>
-                  <Link href="#pricing">Upgrade to Pro</Link>
-                </Button>
-                <p className="text-xs text-muted-foreground">Free tier is supported by ads on heavy tools.</p>
-              </CardContent>
-            </Card>
-          </CardContent>
-        </Card>
-      </section>
-
-      {/* Pricing */}
-      <section id="pricing" className="mx-auto max-w-6xl px-4 pb-16">
-        <div className="mb-6 space-y-2">
-          <h2 className="text-3xl font-semibold tracking-tight">Pricing</h2>
-          <p className="text-muted-foreground">Simple, student-friendly.</p>
-        </div>
-
-        <div className="grid gap-5 lg:grid-cols-2">
-          <PricingCard
-            title="Free"
-            price="$0"
-            subtitle="Ads supported"
-            bullets={[
-              "Core tools",
-              "Heavy tools: ads during generation",
-              "10 heavy generations/day",
-              "Copy output",
-              "Limited history (MVP)",
-            ]}
-            ctaLabel="Keep using Free"
-            ctaHref="#tools"
-            variant="outline"
-          />
-
-          <PricingCard
-            title="Pro"
-            price="$6.99/mo"
-            subtitle="Ad-free + exports"
-            bullets={[
-              "No ads",
-              "Higher limits",
-              "Faster feel (UX)",
-              "Saved Study Caves (MVP stub)",
-              "Exports: PDF / Notion / Anki CSV (MVP stub)",
-            ]}
-            ctaLabel="Go Pro"
-            ctaHref="/checkout?plan=pro"
-            variant="default"
-            highlight
-          />
-        </div>
-
-        {/* Footer ads (2) */}
-        {showStationaryAds ? (
-          <div className="mt-8 grid gap-3 sm:grid-cols-2">
-            <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-            <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-          </div>
-        ) : null}
-
-        <Footer />
-      </section>
+      </div>
 
       {/* Video ad overlay */}
       {showGeneratingOverlay || showAdOverlay ? (
@@ -920,6 +960,37 @@ function StationaryAdSlot({ title, subtitle, tall }: { title: string; subtitle: 
           Static placement (no animation). Replace with your ad network later.
         </p>
       </div>
+    </div>
+  );
+}
+
+function SideRailAds({ showUpsell }: { showUpsell?: boolean }) {
+  return (
+    <div className="sticky top-24 space-y-4">
+      <Card className="rounded-3xl">
+        <CardHeader>
+          <CardTitle className="text-base">Why ads?</CardTitle>
+          <CardDescription>They keep AcePrep free.</CardDescription>
+        </CardHeader>
+        <CardContent className="text-sm text-muted-foreground">
+          We only show short ads on heavy tools so everyone can study without paywalls.
+        </CardContent>
+      </Card>
+      <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+      <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+      {showUpsell ? (
+        <Card className="rounded-3xl">
+          <CardHeader>
+            <CardTitle className="text-base">Prefer ad-free?</CardTitle>
+            <CardDescription>Upgrade anytime.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button className="w-full rounded-2xl" asChild>
+              <Link href="#pricing">Compare plans</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   );
 }
