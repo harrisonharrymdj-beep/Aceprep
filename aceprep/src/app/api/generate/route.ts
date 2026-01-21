@@ -466,14 +466,40 @@ function okResponse(params: {
   };
 }
 
-function errResponse(message: string) {
+function formatGenerationError(err: unknown) {
+  if (!err || typeof err !== "object") return null;
+  const typed = err as {
+    name?: string;
+    message?: string;
+    code?: string;
+    status?: number;
+    cause?: { name?: string; message?: string; code?: string } | string;
+  };
+  const causeMessage =
+    typeof typed.cause === "string"
+      ? typed.cause
+      : typed.cause?.message
+      ? `${typed.cause.name ?? "Cause"}: ${typed.cause.message}`
+      : null;
+
+  return {
+    name: typed.name ?? "Error",
+    message: typed.message ?? "Unknown error",
+    code: typed.code ?? null,
+    status: typeof typed.status === "number" ? typed.status : null,
+    cause: causeMessage,
+  };
+}
+
+function errResponse(message: string, details?: Record<string, unknown> | null, status = 500) {
   return new Response(
     JSON.stringify({
       ok: false,
       error: message,
       hint: "Please retry in a moment.",
+      details: details ?? null,
     }),
-    { status: 500, headers: { "Content-Type": "application/json" } }
+    { status, headers: { "Content-Type": "application/json" } }
   );
 }
 
@@ -688,12 +714,13 @@ export async function POST(req: Request) {
     let result: Awaited<ReturnType<typeof attempt>> | null = null;
     try {
       result = await attempt();
-    } catch {
+    } catch (err) {
       // retry once if invalid/failure
       try {
         result = await attempt();
-      } catch {
-        return errResponse("Generation failed. Please retry.");
+      } catch (retryErr) {
+        const details = formatGenerationError(retryErr) ?? formatGenerationError(err);
+        return errResponse("Generation failed. Please retry.", details, 502);
       }
     }
 
@@ -740,6 +767,7 @@ export async function POST(req: Request) {
         }
       );
     }
-    return errResponse("Unexpected error. Please retry.");
+    const details = formatGenerationError(err);
+    return errResponse("Unexpected error. Please retry.", details);
   }
 }
