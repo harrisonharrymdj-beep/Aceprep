@@ -511,6 +511,7 @@ function errResponse(message: string, details?: Record<string, unknown> | null, 
 export async function POST(req: Request) {
   const start = Date.now();
   const ip = await getIP();
+  const debugEnabled = req.headers.get("x-aceprep-debug") === "1" || process.env.NODE_ENV !== "production";
 
   try {
     const ct = req.headers.get("content-type") || "";
