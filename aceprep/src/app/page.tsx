@@ -330,8 +330,8 @@ export default function Page() {
     <main className="min-h-screen bg-background text-foreground">
       <StickyHeader tier={tier} setTier={setTier} />
 
-      <div className="mx-auto max-w-7xl px-4 xl:px-8">
-        <div className="grid gap-6 xl:gap-10 xl:grid-cols-[260px_minmax(0,1fr)_260px]">
+      <div className="mx-auto max-w-7xl px-4">
+        <div className="grid gap-6 xl:grid-cols-[220px_minmax(0,1fr)_220px]">
           <aside className="hidden xl:flex xl:flex-col gap-4 pt-10">
             <SideRailAds />
           </aside>
@@ -437,9 +437,10 @@ export default function Page() {
             </section>
 
             {/* Tool Panel + Ads */}
-            <section id="tools" className="space-y-6">
-              {/* Main tool card */}
-              <Card className="rounded-3xl">
+            <section id="tools">
+              <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
+                {/* Main tool card */}
+                <Card className="rounded-3xl">
             <CardHeader className="space-y-2">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -679,29 +680,33 @@ export default function Page() {
             </CardContent>
           </Card>
 
-              <Card className="rounded-3xl">
-                <CardHeader>
-                  <CardTitle className="text-base">Upgrade</CardTitle>
-                  <CardDescription>No ads, higher limits, exports.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="flex items-center gap-2 text-sm">
-                    <Crown className="h-4 w-4" />
-                    Pro: $6.99/mo (recommended)
-                  </div>
-                  <Button className="w-full rounded-2xl" asChild>
-                    <Link href="#pricing">See Pro details</Link>
-                  </Button>
-                  <p className="text-xs text-muted-foreground">{BRAND_LINE}</p>
-                </CardContent>
-              </Card>
+                {/* Right sidebar ads (2) */}
+                <div className="space-y-6">
+                  <Card className="rounded-3xl">
+                    <CardHeader>
+                      <CardTitle className="text-base">Upgrade</CardTitle>
+                      <CardDescription>No ads, higher limits, exports.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <div className="flex items-center gap-2 text-sm">
+                        <Crown className="h-4 w-4" />
+                        Pro: $6.99/mo (recommended)
+                      </div>
+                      <Button className="w-full rounded-2xl" asChild>
+                        <Link href="#pricing">See Pro details</Link>
+                      </Button>
+                      <p className="text-xs text-muted-foreground">{BRAND_LINE}</p>
+                    </CardContent>
+                  </Card>
 
-              {showStationaryAds ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+                  {showStationaryAds ? (
+                    <>
+                      <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+                      <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+                    </>
+                  ) : null}
                 </div>
-              ) : null}
+              </div>
             </section>
 
             {/* Ethics */}
