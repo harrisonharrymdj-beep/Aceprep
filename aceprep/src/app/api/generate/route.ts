@@ -466,34 +466,13 @@ function okResponse(params: {
   };
 }
 
-function diagnosticHintFromError(details: { message: string; code?: string | null; cause?: string | null }) {
-  const message = details.message.toLowerCase();
-  const code = (details.code ?? "").toLowerCase();
-  const cause = (details.cause ?? "").toLowerCase();
-  const haystack = `${message} ${code} ${cause}`;
-  if (/(timeout|timed out|etimedout)/.test(haystack)) {
-    return "Upstream timeout. Check model latency, request size, or upstream availability.";
-  }
-  if (/(econnreset|socket hang up|fetch failed)/.test(haystack)) {
-    return "Connection reset to upstream. Check network egress, OpenAI availability, or retry with backoff.";
-  }
-  if (/(enotfound|dns)/.test(haystack)) {
-    return "DNS lookup failed. Verify network/DNS configuration and upstream host resolution.";
-  }
-  if (/(econnrefused|connection refused)/.test(haystack)) {
-    return "Connection refused. Verify upstream endpoint and outbound firewall rules.";
-  }
-  return null;
-}
-
-function formatGenerationError(err: unknown, includeStack = false) {
+function formatGenerationError(err: unknown) {
   if (!err || typeof err !== "object") return null;
   const typed = err as {
     name?: string;
     message?: string;
     code?: string;
     status?: number;
-    stack?: string;
     cause?: { name?: string; message?: string; code?: string } | string;
   };
   const causeMessage =
@@ -503,24 +482,12 @@ function formatGenerationError(err: unknown, includeStack = false) {
       ? `${typed.cause.name ?? "Cause"}: ${typed.cause.message}`
       : null;
 
-  const base = {
+  return {
     name: typed.name ?? "Error",
     message: typed.message ?? "Unknown error",
     code: typed.code ?? null,
     status: typeof typed.status === "number" ? typed.status : null,
     cause: causeMessage,
-  };
-
-  const hint = diagnosticHintFromError({
-    message: base.message,
-    code: base.code,
-    cause: base.cause,
-  });
-
-  return {
-    ...base,
-    hint,
-    stack: includeStack ? typed.stack ?? null : null,
   };
 }
 
@@ -753,7 +720,7 @@ export async function POST(req: Request) {
       try {
         result = await attempt();
       } catch (retryErr) {
-        const details = formatGenerationError(retryErr, debugEnabled) ?? formatGenerationError(err, debugEnabled);
+        const details = formatGenerationError(retryErr) ?? formatGenerationError(err);
         return errResponse("Generation failed. Please retry.", details, 502);
       }
     }
@@ -801,7 +768,7 @@ export async function POST(req: Request) {
         }
       );
     }
-    const details = formatGenerationError(err, debugEnabled);
+    const details = formatGenerationError(err);
     return errResponse("Unexpected error. Please retry.", details);
   }
 }
