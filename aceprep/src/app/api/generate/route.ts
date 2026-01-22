@@ -466,14 +466,73 @@ function okResponse(params: {
   };
 }
 
-function errResponse(message: string) {
+function diagnosticHintFromError(details: { message: string; code?: string | null; cause?: string | null }) {
+  const message = details.message.toLowerCase();
+  const code = (details.code ?? "").toLowerCase();
+  const cause = (details.cause ?? "").toLowerCase();
+  const haystack = `${message} ${code} ${cause}`;
+  if (/(timeout|timed out|etimedout)/.test(haystack)) {
+    return "Upstream timeout. Check model latency, request size, or upstream availability.";
+  }
+  if (/(econnreset|socket hang up|fetch failed)/.test(haystack)) {
+    return "Connection reset to upstream. Check network egress, OpenAI availability, or retry with backoff.";
+  }
+  if (/(enotfound|dns)/.test(haystack)) {
+    return "DNS lookup failed. Verify network/DNS configuration and upstream host resolution.";
+  }
+  if (/(econnrefused|connection refused)/.test(haystack)) {
+    return "Connection refused. Verify upstream endpoint and outbound firewall rules.";
+  }
+  return null;
+}
+
+function formatGenerationError(err: unknown, includeStack = false) {
+  if (!err || typeof err !== "object") return null;
+  const typed = err as {
+    name?: string;
+    message?: string;
+    code?: string;
+    status?: number;
+    stack?: string;
+    cause?: { name?: string; message?: string; code?: string } | string;
+  };
+  const causeMessage =
+    typeof typed.cause === "string"
+      ? typed.cause
+      : typed.cause?.message
+      ? `${typed.cause.name ?? "Cause"}: ${typed.cause.message}`
+      : null;
+
+  const base = {
+    name: typed.name ?? "Error",
+    message: typed.message ?? "Unknown error",
+    code: typed.code ?? null,
+    status: typeof typed.status === "number" ? typed.status : null,
+    cause: causeMessage,
+  };
+
+  const hint = diagnosticHintFromError({
+    message: base.message,
+    code: base.code,
+    cause: base.cause,
+  });
+
+  return {
+    ...base,
+    hint,
+    stack: includeStack ? typed.stack ?? null : null,
+  };
+}
+
+function errResponse(message: string, details?: Record<string, unknown> | null, status = 500) {
   return new Response(
     JSON.stringify({
       ok: false,
       error: message,
       hint: "Please retry in a moment.",
+      details: details ?? null,
     }),
-    { status: 500, headers: { "Content-Type": "application/json" } }
+    { status, headers: { "Content-Type": "application/json" } }
   );
 }
 
@@ -485,6 +544,7 @@ function errResponse(message: string) {
 export async function POST(req: Request) {
   const start = Date.now();
   const ip = await getIP();
+  const debugEnabled = req.headers.get("x-aceprep-debug") === "1" || process.env.NODE_ENV !== "production";
 
   try {
     const ct = req.headers.get("content-type") || "";
@@ -654,46 +714,47 @@ export async function POST(req: Request) {
     const attempt = async () => {
       // Special-case reviewer so TypeScript knows the schema
       if (tool === "reviewer") {
+        const res = await generateObject({
+          model: openai(providerModelId),
+          schema: ReviewerSchema,
+          system: sys,
+          prompt,
+          temperature: 0.2,
+        });
+
+        // Enforce rule when no answerKey
+        if (!hasAnswerKey) {
+          // res.object is already typed as ReviewerSchema output
+          if (res.object.finalAnswerProvided !== false) {
+            res.object.finalAnswerProvided = false;
+          }
+        }
+        return res;
+      }
+
+      // All other tools
       const res = await generateObject({
         model: openai(providerModelId),
-        schema: ReviewerSchema,
+        schema,
         system: sys,
         prompt,
         temperature: 0.2,
       });
 
-      // Enforce rule when no answerKey
-      if (!hasAnswerKey) {
-        // res.object is already typed as ReviewerSchema output
-        if (res.object.finalAnswerProvided !== false) {
-          res.object.finalAnswerProvided = false;
-        }
-      }
       return res;
-    }
-
-  // All other tools
-  const res = await generateObject({
-    model: openai(providerModelId),
-    schema,
-    system: sys,
-    prompt,
-    temperature: 0.2,
-  });
-
-  return res;
-};
+    };
 
 
     let result: Awaited<ReturnType<typeof attempt>> | null = null;
     try {
       result = await attempt();
-    } catch {
+    } catch (err) {
       // retry once if invalid/failure
       try {
         result = await attempt();
-      } catch {
-        return errResponse("Generation failed. Please retry.");
+      } catch (retryErr) {
+        const details = formatGenerationError(retryErr, debugEnabled) ?? formatGenerationError(err, debugEnabled);
+        return errResponse("Generation failed. Please retry.", details, 502);
       }
     }
 
@@ -740,6 +801,7 @@ export async function POST(req: Request) {
         }
       );
     }
-    return errResponse("Unexpected error. Please retry.");
+    const details = formatGenerationError(err, debugEnabled);
+    return errResponse("Unexpected error. Please retry.", details);
   }
 }
