@@ -620,8 +620,52 @@ export default function Page() {
 
                   {/* Output placeholder */}
                   <div id="how" className="space-y-3">
-                    {/* keep your existing output renderer here */}
-                  </div>
+  {/* Output header */}
+  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+    <div className="space-y-1">
+      <p className="text-sm font-semibold">Generated output</p>
+      <p className="text-xs text-muted-foreground">
+        {policyRefused?.refused
+          ? "Blocked by ethics guardrails."
+          : apiResult?.data
+            ? "Review, copy, or export."
+            : "Generate to see results here."}
+      </p>
+    </div>
+
+    <div className="flex flex-wrap items-center gap-2">
+      <Button
+        variant="outline"
+        className="rounded-2xl"
+        onClick={copyOutput}
+        disabled={!apiResult?.data}
+      >
+        <Clipboard className="mr-2 h-4 w-4" />
+        Copy JSON
+      </Button>
+
+      <ExportButtons tier={tier} enabled={!!apiResult?.data} />
+    </div>
+  </div>
+
+  {/* Output body */}
+  {isGenerating ? (
+    <SkeletonOutput />
+  ) : error ? (
+    <ErrorCard message={error} onRetry={onGenerate} />
+  ) : policyRefused?.refused ? (
+    <RefusalCard reason={policyRefused.reason} selectedTool={selectedTool} />
+  ) : apiResult?.data ? (
+    <OutputRenderer tool={selectedTool} data={apiResult.data} />
+  ) : (
+    <Card className="rounded-3xl">
+      <CardContent className="p-6 text-sm text-muted-foreground">
+        Paste materials above and click <span className="font-medium text-foreground">Generate</span>.
+      </CardContent>
+    </Card>
+  )}
+</div>
+
                 </CardContent>
               </Card>
             </section>
