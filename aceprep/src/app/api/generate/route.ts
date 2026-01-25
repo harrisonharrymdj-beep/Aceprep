@@ -528,46 +528,6 @@ function okResponse(params: {
   };
 }
 
-<<<<<<< HEAD
-=======
-function formatGenerationError(err: unknown) {
-  if (!err || typeof err !== "object") return null;
-  const typed = err as {
-    name?: string;
-    message?: string;
-    code?: string;
-    status?: number;
-    cause?: { name?: string; message?: string; code?: string } | string;
-  };
-  const causeMessage =
-    typeof typed.cause === "string"
-      ? typed.cause
-      : typed.cause?.message
-      ? `${typed.cause.name ?? "Cause"}: ${typed.cause.message}`
-      : null;
-
-  return {
-    name: typed.name ?? "Error",
-    message: typed.message ?? "Unknown error",
-    code: typed.code ?? null,
-    status: typeof typed.status === "number" ? typed.status : null,
-    cause: causeMessage,
-  };
-}
-
-function errResponse(message: string, details?: Record<string, unknown> | null, status = 500) {
-  return new Response(
-    JSON.stringify({
-      ok: false,
-      error: message,
-      hint: "Please retry in a moment.",
-      details: details ?? null,
-    }),
-    { status, headers: { "Content-Type": "application/json" } }
-  );
-}
-
->>>>>>> b25f17ead7a7dfcc0e1d781a7c104f17a0bb2ba3
 /**
  * -----------------------------
  * 9) POST Handler
@@ -738,60 +698,29 @@ export async function POST(req: Request) {
           temperature: 0.2,
         });
 
-<<<<<<< HEAD
         if (!hasAnswerKey && res.object.finalAnswerProvided !== false) {
           res.object.finalAnswerProvided = false;
-=======
-        // Enforce rule when no answerKey
-        if (!hasAnswerKey) {
-          // res.object is already typed as ReviewerSchema output
-          if (res.object.finalAnswerProvided !== false) {
-            res.object.finalAnswerProvided = false;
-          }
->>>>>>> b25f17ead7a7dfcc0e1d781a7c104f17a0bb2ba3
         }
         return res;
       }
 
-<<<<<<< HEAD
       return await generateObject({
-=======
-      // All other tools
-      const res = await generateObject({
->>>>>>> b25f17ead7a7dfcc0e1d781a7c104f17a0bb2ba3
         model: openai(providerModelId),
         schema,
         system: sys,
         prompt,
         temperature: 0.2,
       });
-<<<<<<< HEAD
     };
-=======
-
-      return res;
-    };
-
->>>>>>> b25f17ead7a7dfcc0e1d781a7c104f17a0bb2ba3
 
     let result: Awaited<ReturnType<typeof attempt>> | null = null;
     try {
       result = await attempt();
-<<<<<<< HEAD
     } catch {
       try {
         result = await attempt();
       } catch {
         return json(req, { ok: false, error: "Generation failed. Please retry." }, 500);
-=======
-    } catch (err) {
-      // retry once if invalid/failure
-      try {
-        result = await attempt();
-      } catch (retryErr) {
-        const details = formatGenerationError(retryErr) ?? formatGenerationError(err);
-        return errResponse("Generation failed. Please retry.", details, 502);
->>>>>>> b25f17ead7a7dfcc0e1d781a7c104f17a0bb2ba3
       }
     }
 
@@ -831,11 +760,6 @@ export async function POST(req: Request) {
         { "Retry-After": String(err.retryAfter ?? 30) }
       );
     }
-<<<<<<< HEAD
     return json(req, { ok: false, error: "Unexpected error. Please retry." }, 500);
-=======
-    const details = formatGenerationError(err);
-    return errResponse("Unexpected error. Please retry.", details);
->>>>>>> b25f17ead7a7dfcc0e1d781a7c104f17a0bb2ba3
   }
 }
