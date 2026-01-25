@@ -409,277 +409,247 @@ export default function Page() {
       </section>
 
       {/* Tool Panel + Ads */}
-      <section id="tools" className="mx-auto max-w-6xl px-4 pb-10">
-        <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
-          {/* Main tool card */}
-          <Card className="rounded-3xl">
-            <CardHeader className="space-y-2">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <CardTitle className="text-xl">Try it now</CardTitle>
-                  <CardDescription>Pick a tool, paste your materials, and generate.</CardDescription>
-                </div>
+      <section id="tools" className="mx-auto max-w-7xl px-4 pb-10">
+  {/* 3 columns on large screens: left ads | center app | right ads */}
+  <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,720px)_280px] lg:items-start lg:justify-center">
+    {/* LEFT ADS (never overlap; hidden on mobile) */}
+    <aside className="hidden lg:block">
+      <div className="sticky top-20 space-y-6">
+        <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+        <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+        <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+      </div>
+    </aside>
 
-                {/* Tier toggle (MVP) */}
-                <div className="flex items-center gap-2">
-                  <Badge variant={tier === "free" ? "secondary" : "outline"} className="rounded-full px-3 py-1">
-                    {tier === "free" ? "Free" : "Pro"}
-                  </Badge>
-                  <div className="flex gap-1 rounded-2xl border p-1">
-                    <Button
-                      size="sm"
-                      variant={tier === "free" ? "default" : "ghost"}
-                      className="rounded-xl"
-                      onClick={() => setTier("free")}
-                    >
-                      Free
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={tier === "pro" ? "default" : "ghost"}
-                      className="rounded-xl"
-                      onClick={() => setTier("pro")}
-                    >
-                      Pro
-                    </Button>
-                  </div>
+    {/* CENTER COLUMN (single column, no overlap) */}
+    <div className="min-w-0">
+      <Card className="rounded-3xl">
+        <CardHeader className="space-y-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle className="text-xl">Try it now</CardTitle>
+              <CardDescription>Pick a tool, paste your materials, and generate.</CardDescription>
+            </div>
+
+            {/* Tier toggle (MVP) */}
+            <div className="flex items-center gap-2">
+              <Badge variant={tier === "free" ? "secondary" : "outline"} className="rounded-full px-3 py-1">
+                {tier === "free" ? "Free" : "Pro"}
+              </Badge>
+              <div className="flex gap-1 rounded-2xl border p-1">
+                <Button
+                  size="sm"
+                  variant={tier === "free" ? "default" : "ghost"}
+                  className="rounded-xl"
+                  onClick={() => setTier("free")}
+                >
+                  Free
+                </Button>
+                <Button
+                  size="sm"
+                  variant={tier === "pro" ? "default" : "ghost"}
+                  className="rounded-xl"
+                  onClick={() => setTier("pro")}
+                >
+                  Pro
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <ToolTabs selected={selectedTool} onSelect={setSelectedTool} />
+        </CardHeader>
+
+        <CardContent className="space-y-6">
+          {/* Inputs */}
+          <div className="grid gap-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Materials</label>
+              <textarea
+                className="min-h-[180px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                placeholder="Paste lecture notes, slides text, or a problem description…"
+                value={materials}
+                onChange={(e) => setMaterials(e.target.value)}
+              />
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span>Tip: paste raw text from slides/notes for best results.</span>
+                {modelUsed ? (
+                  <span className="rounded-full border px-2 py-0.5">Model: {modelUsed}</span>
+                ) : (
+                  <span className="rounded-full border px-2 py-0.5">Model: (shown after generate)</span>
+                )}
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Course (optional)" value={course} onChange={setCourse} placeholder="ECE 201 — Digital Logic" />
+              <Field label="Topic (optional)" value={topic} onChange={setTopic} placeholder="K-maps, FFs, FSMs…" />
+            </div>
+
+            {selectedTool === "planner" ? (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field
+                  label="Exam date (required)"
+                  value={examDate}
+                  onChange={setExamDate}
+                  placeholder="YYYY-MM-DD"
+                  type="date"
+                />
+                <div className="rounded-2xl border p-3 text-sm text-muted-foreground">
+                  <p className="font-medium text-foreground">MVP note</p>
+                  <p className="mt-1">
+                    Time blocks upload comes later. For now, we’ll build a week plan from your materials + date.
+                  </p>
                 </div>
               </div>
+            ) : null}
 
-              <ToolTabs selected={selectedTool} onSelect={setSelectedTool} />
-            </CardHeader>
-
-            <CardContent className="space-y-6">
-              {/* Inputs */}
+            {selectedTool === "reviewer" ? (
               <div className="grid gap-4">
                 <div className="grid gap-2">
-                  <label className="text-sm font-medium">Materials</label>
+                  <label className="text-sm font-medium">Your answer (required)</label>
                   <textarea
-                    className="min-h-[180px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                    placeholder="Paste lecture notes, slides text, or a problem description…"
-                    value={materials}
-                    onChange={(e) => setMaterials(e.target.value)}
+                    className="min-h-[120px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                    placeholder="Paste what you wrote / your solution attempt…"
+                    value={userAnswer}
+                    onChange={(e) => setUserAnswer(e.target.value)}
                   />
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>Tip: paste raw text from slides/notes for best results.</span>
-                    {modelUsed ? (
-                      <span className="rounded-full border px-2 py-0.5">Model: {modelUsed}</span>
-                    ) : (
-                      <span className="rounded-full border px-2 py-0.5">Model: (shown after generate)</span>
-                    )}
-                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    If you don’t provide an answer key, AcePrep will give hints/checks but won’t dump final answers.
+                  </p>
                 </div>
 
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <Field label="Course (optional)" value={course} onChange={setCourse} placeholder="ECE 201 — Digital Logic" />
-                  <Field label="Topic (optional)" value={topic} onChange={setTopic} placeholder="K-maps, FFs, FSMs…" />
-                </div>
-
-                {selectedTool === "planner" ? (
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <Field
-                      label="Exam date (required)"
-                      value={examDate}
-                      onChange={setExamDate}
-                      placeholder="YYYY-MM-DD"
-                      type="date"
-                    />
-                    <div className="rounded-2xl border p-3 text-sm text-muted-foreground">
-                      <p className="font-medium text-foreground">MVP note</p>
-                      <p className="mt-1">
-                        Time blocks upload comes later. For now, we’ll build a week plan from your materials + date.
-                      </p>
-                    </div>
-                  </div>
-                ) : null}
-
-                {selectedTool === "reviewer" ? (
-                  <div className="grid gap-4">
-                    <div className="grid gap-2">
-                      <label className="text-sm font-medium">Your answer (required)</label>
-                      <textarea
-                        className="min-h-[120px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                        placeholder="Paste what you wrote / your solution attempt…"
-                        value={userAnswer}
-                        onChange={(e) => setUserAnswer(e.target.value)}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        If you don’t provide an answer key, AcePrep will give hints/checks but won’t dump final answers.
-                      </p>
-                    </div>
-
-                    <div className="grid gap-2">
-                      <label className="text-sm font-medium">Answer key (optional)</label>
-                      <textarea
-                        className="min-h-[90px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                        placeholder="Paste the official solution / answer key (optional)…"
-                        value={answerKey}
-                        onChange={(e) => setAnswerKey(e.target.value)}
-                      />
-                    </div>
-                  </div>
-                ) : null}
-
-                {selectedTool === "essay_proofread" ? (
-                  <div className="grid gap-2">
-                    <label className="text-sm font-medium">Essay text (required)</label>
-                    <textarea
-                      className="min-h-[160px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                      placeholder="Paste your essay draft…"
-                      value={userAnswer}
-                      onChange={(e) => setUserAnswer(e.target.value)}
-                    />
-                  </div>
-                ) : null}
-              </div>
-
-              {/* Controls / Limits */}
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="secondary" className="rounded-full">
-                    Tool: {toolMeta.short}
-                  </Badge>
-                  <Badge variant={isHeavyTool ? "outline" : "secondary"} className="rounded-full">
-                    {isHeavyTool ? "Heavy tool" : "Light tool"}
-                  </Badge>
-
-                  {limits ? (
-                    <Badge variant="outline" className="rounded-full">
-                      Remaining today: {limits.remainingToday}
-                    </Badge>
-                  ) : null}
-
-                  {cooldownRemaining > 0 ? (
-                    <Badge variant="outline" className="rounded-full">
-                      <Timer className="mr-1 h-3.5 w-3.5" />
-                      Cooldown: {cooldownRemaining}s
-                    </Badge>
-                  ) : null}
-                </div>
-
-                <div className="flex gap-2">
-                  <Button
-                    onClick={onGenerate}
-                    disabled={!canGenerate}
-                    className="rounded-2xl"
-                    size="lg"
-                  >
-                    {isGenerating ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Generating…
-                      </>
-                    ) : tier === "free" && isHeavyTool ? (
-                      <>
-                        Generate (watch ad)
-                        <ArrowRight className="ml-2 h-4 w-4" />
-                      </>
-                    ) : (
-                      <>
-                        Generate
-                        <ArrowRight className="ml-2 h-4 w-4" />
-                      </>
-                    )}
-                  </Button>
-
-                  <Button
-                    variant="outline"
-                    className="rounded-2xl"
-                    size="lg"
-                    onClick={() => {
-                      setApiResult(null);
-                      setError(null);
-                      setPolicyRefused(null);
-                      setModelUsed(null);
-                      setLimits(null);
-                    }}
-                  >
-                    Reset
-                  </Button>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Answer key (optional)</label>
+                  <textarea
+                    className="min-h-[90px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                    placeholder="Paste the official solution / answer key (optional)…"
+                    value={answerKey}
+                    onChange={(e) => setAnswerKey(e.target.value)}
+                  />
                 </div>
               </div>
+            ) : null}
 
-              {/* Below panel ads (2 horizontal slots) */}
-              {showStationaryAds ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-                </div>
-              ) : null}
-
-              {/* Output */}
-              <div id="how" className="space-y-3">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold">Output</h3>
-                    <p className="text-sm text-muted-foreground">
-                      Structured sections. Copy is free; exports are Pro.
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" className="rounded-2xl" onClick={copyOutput} disabled={!apiResult?.data}>
-                      <Clipboard className="mr-2 h-4 w-4" />
-                      Copy
-                    </Button>
-
-                    <ExportButtons tier={tier} enabled={!!apiResult?.data} />
-                  </div>
-                </div>
-
-                {error ? <ErrorCard message={error} onRetry={canGenerate ? onGenerate : undefined} /> : null}
-
-                {isGenerating && !apiResult ? <SkeletonOutput /> : null}
-
-                {apiResult?.policy?.refused ? (
-                  <RefusalCard reason={apiResult?.policy?.reason ?? null} selectedTool={selectedTool} />
-                ) : null}
-
-                {apiResult?.data && !apiResult?.policy?.refused ? (
-                  <OutputRenderer tool={selectedTool} data={apiResult.data} />
-                ) : null}
-
-                {!apiResult && !isGenerating && !error ? (
-                  <Card className="rounded-3xl">
-                    <CardContent className="p-6 text-sm text-muted-foreground">
-                      Paste your materials above and click <span className="font-medium text-foreground">Generate</span>.
-                      <div className="mt-2 text-xs">
-                        {tier === "free" && isHeavyTool ? "Free heavy tools show a short ad during generation." : "Pro is ad-free."}
-                      </div>
-                    </CardContent>
-                  </Card>
-                ) : null}
+            {selectedTool === "essay_proofread" ? (
+              <div className="grid gap-2">
+                <label className="text-sm font-medium">Essay text (required)</label>
+                <textarea
+                  className="min-h-[160px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  placeholder="Paste your essay draft…"
+                  value={userAnswer}
+                  onChange={(e) => setUserAnswer(e.target.value)}
+                />
               </div>
-            </CardContent>
-          </Card>
-
-          {/* Right sidebar ads (2) */}
-          <div className="space-y-6">
-            <Card className="rounded-3xl">
-              <CardHeader>
-                <CardTitle className="text-base">Upgrade</CardTitle>
-                <CardDescription>No ads, higher limits, exports.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex items-center gap-2 text-sm">
-                  <Crown className="h-4 w-4" />
-                  Pro: $6.99/mo (recommended)
-                </div>
-                <Button className="w-full rounded-2xl" asChild>
-                  <Link href="#pricing">Go Pro</Link>
-                </Button>
-                <p className="text-xs text-muted-foreground">{BRAND_LINE}</p>
-              </CardContent>
-            </Card>
-
-            {showStationaryAds ? (
-              <>
-                <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
-                <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
-              </>
             ) : null}
           </div>
-        </div>
-      </section>
+
+          {/* Controls / Limits */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary" className="rounded-full">
+                Tool: {toolMeta.short}
+              </Badge>
+              <Badge variant={isHeavyTool ? "outline" : "secondary"} className="rounded-full">
+                {isHeavyTool ? "Heavy tool" : "Light tool"}
+              </Badge>
+
+              {limits ? (
+                <Badge variant="outline" className="rounded-full">
+                  Remaining today: {limits.remainingToday}
+                </Badge>
+              ) : null}
+
+              {cooldownRemaining > 0 ? (
+                <Badge variant="outline" className="rounded-full">
+                  <Timer className="mr-1 h-3.5 w-3.5" />
+                  Cooldown: {cooldownRemaining}s
+                </Badge>
+              ) : null}
+            </div>
+
+            <div className="flex gap-2">
+              <Button onClick={onGenerate} disabled={!canGenerate} className="rounded-2xl" size="lg">
+                {isGenerating ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Generating…
+                  </>
+                ) : tier === "free" && isHeavyTool ? (
+                  <>
+                    Generate (watch ad) <ArrowRight className="ml-2 h-4 w-4" />
+                  </>
+                ) : (
+                  <>
+                    Generate <ArrowRight className="ml-2 h-4 w-4" />
+                  </>
+                )}
+              </Button>
+
+              <Button
+                variant="outline"
+                className="rounded-2xl"
+                size="lg"
+                onClick={() => {
+                  setApiResult(null);
+                  setError(null);
+                  setPolicyRefused(null);
+                  setModelUsed(null);
+                  setLimits(null);
+                }}
+              >
+                Reset
+              </Button>
+            </div>
+          </div>
+
+          {/* 2 horizontal ads BELOW tool panel */}
+          {showStationaryAds ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+              <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+            </div>
+          ) : null}
+
+          {/* Output */}
+          <div id="how" className="space-y-3">
+            {/* (keep your existing output header / buttons / states / renderer here unchanged) */}
+            {/* ... */}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+
+    {/* RIGHT ADS + small "sorry about ads" copy */}
+    <aside className="hidden lg:block">
+      <div className="sticky top-20 space-y-6">
+        <Card className="rounded-3xl">
+          <CardHeader>
+            <CardTitle className="text-base">Heads up</CardTitle>
+            <CardDescription>Free is ad-supported.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm text-muted-foreground">
+            <p>Sorry about the ads — it’s what keeps AcePrep free.</p>
+            <p className="text-xs">{BRAND_LINE}</p>
+            <div className="flex gap-2 pt-2">
+              <Button variant="outline" className="rounded-2xl w-full" asChild>
+                <Link href="/login">Sign in</Link>
+              </Button>
+              <Button className="rounded-2xl w-full" asChild>
+                <Link href="#tools">Use as guest</Link>
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+        <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+        <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
+      </div>
+    </aside>
+  </div>
+</section>
+
 
       {/* Ethics */}
       <section id="ethics" className="mx-auto max-w-6xl px-4 pb-12">

@@ -8,6 +8,55 @@ export const dynamic = "force-dynamic";
 
 /**
  * -----------------------------
+ * 0) CORS (Fixes "network error" from browser)
+ * -----------------------------
+ */
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "https://aceprep.me",
+  "https://www.aceprep.me",
+  // add Vercel preview domains if needed
+];
+
+function corsHeaders(req: Request) {
+  const origin = req.headers.get("origin") || "";
+  // If you ever use credentials: "include", origin must be exact (not "*")
+  const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+
+  return {
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Max-Age": "86400",
+    Vary: "Origin",
+  };
+}
+
+function json(
+  req: Request,
+  body: any,
+  status = 200,
+  extraHeaders: Record<string, string> = {}
+) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      ...corsHeaders(req),
+      ...extraHeaders,
+    },
+  });
+}
+
+// Preflight
+export async function OPTIONS(req: Request) {
+  return new Response(null, { status: 204, headers: corsHeaders(req) });
+}
+
+/**
+ * -----------------------------
  * 1) Constants / Config
  * -----------------------------
  */
@@ -100,7 +149,7 @@ const RequestSchema = z.object({
 
 /**
  * -----------------------------
- * 4) Tool Output Schemas (Structured Outputs)
+ * 4) Tool Output Schemas
  * -----------------------------
  */
 const StudyGuideSchema = z.object({
@@ -115,7 +164,9 @@ const StudyGuideSchema = z.object({
           .array(
             z.object({
               question: z.string(),
-              type: z.enum(["concept", "calculation", "application", "mixed"]).optional(),
+              type: z
+                .enum(["concept", "calculation", "application", "mixed"])
+                .optional(),
             })
           )
           .min(3),
@@ -207,7 +258,15 @@ const EssayProofreadSchema = z.object({
   issues: z
     .array(
       z.object({
-        type: z.enum(["grammar", "clarity", "structure", "argument", "tone", "citation", "other"]),
+        type: z.enum([
+          "grammar",
+          "clarity",
+          "structure",
+          "argument",
+          "tone",
+          "citation",
+          "other",
+        ]),
         severity: z.enum(["low", "medium", "high"]),
         note: z.string(),
         suggestion: z.string().optional(),
@@ -245,7 +304,7 @@ function schemaForTool(tool: Tool) {
  * -----------------------------
  */
 async function getIP(): Promise<string> {
-  const h = await headers(); // ✅ await fixes h.get(...)
+  const h = await headers();
   const xff = h.get("x-forwarded-for");
   if (xff) return xff.split(",")[0]?.trim() || "unknown";
   const realIp = h.get("x-real-ip");
@@ -287,7 +346,10 @@ function getFreeHeavyLimits(sessionId: string) {
     dailyStore.set(key, { dateKey, heavyCount: 0 });
     return { used: 0, remaining: FREE_HEAVY_DAILY_LIMIT };
   }
-  return { used: st.heavyCount, remaining: Math.max(0, FREE_HEAVY_DAILY_LIMIT - st.heavyCount) };
+  return {
+    used: st.heavyCount,
+    remaining: Math.max(0, FREE_HEAVY_DAILY_LIMIT - st.heavyCount),
+  };
 }
 
 function incrementFreeHeavy(sessionId: string) {
@@ -330,7 +392,9 @@ function detectJailbreak(text: string): boolean {
 
 function detectHate(text: string): boolean {
   const t = text.toLowerCase();
-  return ["kill all ", "exterminate ", "racial superiority", "inferior race"].some((p) => t.includes(p));
+  return ["kill all ", "exterminate ", "racial superiority", "inferior race"].some(
+    (p) => t.includes(p)
+  );
 }
 
 function detectIllegal(text: string): boolean {
@@ -364,7 +428,7 @@ function detectAcademicDishonesty(input: z.infer<typeof InputSchema>): boolean {
 
 /**
  * -----------------------------
- * 6) Prompting (Anti-jailbreak + Tool-specific)
+ * 6) Prompting
  * -----------------------------
  */
 function baseSystemPrompt(tool: Tool, tier: Tier, hasAnswerKey: boolean) {
@@ -407,18 +471,16 @@ function userPrompt(tool: Tool, input: z.infer<typeof InputSchema>) {
 
 /**
  * -----------------------------
- * 7) Model Routing (Your Spec)
+ * 7) Model Routing
  * -----------------------------
  */
 const MODEL_HEAVY = "gpt-4.1-mini";
 const MODEL_CHEAP = "gpt-3.5-turbo";
 
 function pickModel(tool: Tool) {
-  // Heavy tools -> 4.1-mini
   if (HEAVY_TOOLS.has(tool)) {
     return { providerModelId: MODEL_HEAVY, reportModelUsed: `openai/${MODEL_HEAVY}` };
   }
-  // Cheap tools -> 3.5-turbo
   return { providerModelId: MODEL_CHEAP, reportModelUsed: `openai/${MODEL_CHEAP}` };
 }
 
@@ -466,17 +528,6 @@ function okResponse(params: {
   };
 }
 
-function errResponse(message: string) {
-  return new Response(
-    JSON.stringify({
-      ok: false,
-      error: message,
-      hint: "Please retry in a moment.",
-    }),
-    { status: 500, headers: { "Content-Type": "application/json" } }
-  );
-}
-
 /**
  * -----------------------------
  * 9) POST Handler
@@ -489,31 +540,24 @@ export async function POST(req: Request) {
   try {
     const ct = req.headers.get("content-type") || "";
     if (!ct.includes("application/json")) {
-      return new Response(JSON.stringify({ ok: false, error: "Content-Type must be application/json" }), {
-        status: 415,
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(req, { ok: false, error: "Content-Type must be application/json" }, 415);
     }
 
-    if (!process.env.OPENAI_API_KEY) return errResponse("Server is missing OPENAI_API_KEY.");
+    if (!process.env.OPENAI_API_KEY) {
+      return json(req, { ok: false, error: "Server is missing OPENAI_API_KEY." }, 500);
+    }
 
     const raw = await req.json();
     const parsed = RequestSchema.safeParse(raw);
     if (!parsed.success) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "Invalid request body", details: parsed.error.flatten() }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return json(req, { ok: false, error: "Invalid request body", details: parsed.error.flatten() }, 400);
     }
 
     const { tool, tier, input, meta } = parsed.data;
 
     const sessionId = meta.sessionId?.trim();
     if (!sessionId || sessionId.length < BOT_MIN_SESSIONID_LEN) {
-      return new Response(JSON.stringify({ ok: false, error: "Missing or invalid sessionId" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(req, { ok: false, error: "Missing or invalid sessionId" }, 400);
     }
 
     // Rate limit by IP + sessionId
@@ -521,102 +565,95 @@ export async function POST(req: Request) {
 
     // Payload caps
     if ((input.materials || "").length > MATERIALS_MAX_CHARS) {
-      return new Response(
-        JSON.stringify({ ok: false, error: `materials too large (max ${MATERIALS_MAX_CHARS} chars)` }),
-        { status: 413, headers: { "Content-Type": "application/json" } }
-      );
+      return json(req, { ok: false, error: `materials too large (max ${MATERIALS_MAX_CHARS} chars)` }, 413);
     }
 
     const combinedText =
       `${tool}\n${tier}\n${input.topic ?? ""}\n${input.course ?? ""}\n` +
       `${input.materials ?? ""}\n${input.userAnswer ?? ""}\n${input.answerKey ?? ""}`;
 
-    // Anti-jailbreak and guardrails
+    // Guardrails
     if (detectJailbreak(combinedText)) {
       const latencyMs = Date.now() - start;
       const base = refusal("jailbreak patterns detected", "jailbreak");
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: base.data,
-            refused: true,
-            reason: base.policy.reason,
-            showAd: false,
-            remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
-            cooldownSeconds: 0,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: base.data,
+          refused: true,
+          reason: base.policy.reason,
+          showAd: false,
+          remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
+          cooldownSeconds: 0,
+          latencyMs,
+        }),
+        200
       );
     }
 
     if (detectHate(combinedText)) {
       const latencyMs = Date.now() - start;
       const base = refusal("hate content", "hate");
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: base.data,
-            refused: true,
-            reason: base.policy.reason,
-            showAd: false,
-            remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
-            cooldownSeconds: 0,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: base.data,
+          refused: true,
+          reason: base.policy.reason,
+          showAd: false,
+          remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
+          cooldownSeconds: 0,
+          latencyMs,
+        }),
+        200
       );
     }
 
     if (detectIllegal(combinedText)) {
       const latencyMs = Date.now() - start;
       const base = refusal("illegal instructions", "illegal");
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: base.data,
-            refused: true,
-            reason: base.policy.reason,
-            showAd: false,
-            remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
-            cooldownSeconds: 0,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: base.data,
+          refused: true,
+          reason: base.policy.reason,
+          showAd: false,
+          remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
+          cooldownSeconds: 0,
+          latencyMs,
+        }),
+        200
       );
     }
 
     if (detectAcademicDishonesty(input)) {
       const latencyMs = Date.now() - start;
       const base = refusal("academic dishonesty request", "dishonesty");
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: base.data,
-            refused: true,
-            reason: base.policy.reason,
-            showAd: false,
-            remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
-            cooldownSeconds: 0,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: base.data,
+          refused: true,
+          reason: base.policy.reason,
+          showAd: false,
+          remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
+          cooldownSeconds: 0,
+          latencyMs,
+        }),
+        200
       );
     }
 
@@ -626,22 +663,21 @@ export async function POST(req: Request) {
 
     if (tier === "free" && isHeavy && remainingToday <= 0) {
       const latencyMs = Date.now() - start;
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: { message: `You’ve hit today’s free limit for heavy tools. Please wait and try again.\n\n${BRAND_LINE}` },
-            refused: false,
-            reason: null,
-            showAd: true,
-            remainingToday: 0,
-            cooldownSeconds: FREE_COOLDOWN_SECONDS,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: { message: `You’ve hit today’s free limit for heavy tools. Please wait and try again.\n\n${BRAND_LINE}` },
+          refused: false,
+          reason: null,
+          showAd: true,
+          remainingToday: 0,
+          cooldownSeconds: FREE_COOLDOWN_SECONDS,
+          latencyMs,
+        }),
+        200
       );
     }
 
@@ -652,48 +688,38 @@ export async function POST(req: Request) {
     const schema = schemaForTool(tool);
 
     const attempt = async () => {
-      // Special-case reviewer so TypeScript knows the schema
       if (tool === "reviewer") {
-      const res = await generateObject({
+        const res = await generateObject({
+          model: openai(providerModelId),
+          schema: ReviewerSchema,
+          system: sys,
+          prompt,
+          temperature: 0.2,
+        });
+
+        if (!hasAnswerKey && res.object.finalAnswerProvided !== false) {
+          res.object.finalAnswerProvided = false;
+        }
+        return res;
+      }
+
+      return await generateObject({
         model: openai(providerModelId),
-        schema: ReviewerSchema,
+        schema,
         system: sys,
         prompt,
         temperature: 0.2,
       });
-
-      // Enforce rule when no answerKey
-      if (!hasAnswerKey) {
-        // res.object is already typed as ReviewerSchema output
-        if (res.object.finalAnswerProvided !== false) {
-          res.object.finalAnswerProvided = false;
-        }
-      }
-      return res;
-    }
-
-  // All other tools
-  const res = await generateObject({
-    model: openai(providerModelId),
-    schema,
-    system: sys,
-    prompt,
-    temperature: 0.2,
-  });
-
-  return res;
-};
-
+    };
 
     let result: Awaited<ReturnType<typeof attempt>> | null = null;
     try {
       result = await attempt();
     } catch {
-      // retry once if invalid/failure
       try {
         result = await attempt();
       } catch {
-        return errResponse("Generation failed. Please retry.");
+        return json(req, { ok: false, error: "Generation failed. Please retry." }, 500);
       }
     }
 
@@ -705,41 +731,34 @@ export async function POST(req: Request) {
 
     const latencyMs = Date.now() - start;
     const showAd = tier === "free" && isHeavy;
-
-    // Don’t log materials; return minimal usage if available
     const usage = (result as any)?.usage ?? null;
 
-    return new Response(
-      JSON.stringify(
-        okResponse({
-          tool,
-          tier,
-          modelUsed: reportModelUsed, // returns "openai/..."
-          data: result!.object,
-          refused: false,
-          reason: null,
-          showAd,
-          remainingToday: tier === "free" && isHeavy ? remainingToday : 9999,
-          cooldownSeconds: 0,
-          latencyMs,
-          usage,
-        })
-      ),
-      { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } }
+    return json(
+      req,
+      okResponse({
+        tool,
+        tier,
+        modelUsed: reportModelUsed,
+        data: result!.object,
+        refused: false,
+        reason: null,
+        showAd,
+        remainingToday: tier === "free" && isHeavy ? remainingToday : 9999,
+        cooldownSeconds: 0,
+        latencyMs,
+        usage,
+      }),
+      200
     );
   } catch (err: any) {
     if (err?.status === 429) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "Too many requests. Please slow down.", retryAfterSeconds: err.retryAfter ?? 30 }),
-        {
-          status: 429,
-          headers: {
-            "Content-Type": "application/json",
-            "Retry-After": String(err.retryAfter ?? 30),
-          },
-        }
+      return json(
+        req,
+        { ok: false, error: "Too many requests. Please slow down.", retryAfterSeconds: err.retryAfter ?? 30 },
+        429,
+        { "Retry-After": String(err.retryAfter ?? 30) }
       );
     }
-    return errResponse("Unexpected error. Please retry.");
+    return json(req, { ok: false, error: "Unexpected error. Please retry." }, 500);
   }
 }
