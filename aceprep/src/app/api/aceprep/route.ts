@@ -764,6 +764,10 @@ const prompt = userPrompt(tool, cleanInput);
   len: process.env.OPENAI_API_KEY?.length,
 });
 
+if (debugEnabled) {
+  const k = process.env.OPENAI_API_KEY || "";
+  console.log("OPENAI_KEY_FINGERPRINT", k.slice(0, 8), k.slice(-4), "len", k.length);
+}
 
     const attempt = async () => {
       if (tool === "reviewer") {
