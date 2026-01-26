@@ -515,8 +515,8 @@ function userPrompt(tool: Tool, input: z.infer<typeof InputSchema>) {
  * 7) Model Routing
  * -----------------------------
  */
-const MODEL_HEAVY = "gpt-4.1-mini";
-const MODEL_CHEAP = "gpt-4.1-mini";
+const MODEL_HEAVY = "gpt-5-mini";
+const MODEL_CHEAP = "gpt-5-nano";
 
 function pickModel(tool: Tool) {
   if (HEAVY_TOOLS.has(tool)) {
