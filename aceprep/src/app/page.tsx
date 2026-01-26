@@ -265,10 +265,33 @@ export default function Page() {
     try {
       const res = await fetch(`${getBaseUrl()}/api/aceprep`, {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    "Content-Type": "application/json",
+    "x-aceprep-debug": "1", // ✅ forces debug body (even in prod)
+  },
   body: JSON.stringify(payload),
   cache: "no-store",
 });
+
+const rawText = await res.text(); // ✅ read raw first
+
+let jsonData: any = null;
+try {
+  jsonData = JSON.parse(rawText);
+} catch {
+  // if it's not JSON, keep rawText
+}
+
+if (!res.ok) {
+  console.error("AcePrep API failed:", res.status, jsonData ?? rawText);
+  throw new Error(
+    (jsonData && (jsonData.error || jsonData.message)) ||
+      `AcePrep failed (${res.status})`
+  );
+}
+
+return jsonData;
+
 
 
       const json = await res.json();
