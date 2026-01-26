@@ -757,6 +757,14 @@ const cleanInput = {
 const prompt = userPrompt(tool, cleanInput);
     const schema = schemaForTool(tool);
 
+    console.log("OPENAI_API_KEY loaded:", {
+  present: !!process.env.OPENAI_API_KEY,
+  prefix: process.env.OPENAI_API_KEY?.slice(0, 7),   // "sk-proj-"
+  suffix: process.env.OPENAI_API_KEY?.slice(-4),    // last 4 chars only
+  len: process.env.OPENAI_API_KEY?.length,
+});
+
+
     const attempt = async () => {
       if (tool === "reviewer") {
         const res = await generateObject({
