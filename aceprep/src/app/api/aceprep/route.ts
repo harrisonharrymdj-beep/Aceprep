@@ -776,3 +776,7 @@ export async function POST(req: Request) {
     return json(req, { ok: false, error: "Unexpected error. Please retry." }, 500);
   }
 }
+
+export async function GET(req: Request) {
+  return json(req, { ok: true, message: "AcePrep API is running. Use POST /api/aceprep." }, 200);
+}
