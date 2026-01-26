@@ -202,15 +202,14 @@ const StudyGuideSchema = z.object({
         keyConcepts: z.array(z.string()).min(1),
         misconceptions: z.array(z.string()).min(1),
         practiceQuestions: z
-          .array(
-            z.object({
-              question: z.string(),
-              type: z
-                .enum(["concept", "calculation", "application", "mixed"])
-                .optional(),
-            })
-          )
-          .min(3),
+  .array(
+    z.object({
+      question: z.string(),
+      type: z.enum(["concept", "calculation", "application", "mixed"]),
+    })
+  )
+  .min(3),
+
       })
     )
     .min(1),
