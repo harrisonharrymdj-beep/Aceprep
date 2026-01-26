@@ -118,6 +118,18 @@ function makeSessionId() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
+function getBaseUrl() {
+  // Browser
+  if (typeof window !== "undefined") return "";
+
+  // Server (Vercel/Prod)
+  if (process.env.NEXT_PUBLIC_APP_URL) return process.env.NEXT_PUBLIC_APP_URL;
+
+  // Server (local dev)
+  return "http://localhost:3000";
+}
+
+
 export default function Page() {
   const [selectedTool, setSelectedTool] = useState<Tool>(DEFAULT_TOOL);
   const [tier, setTier] = useState<Tier>("free");
@@ -217,102 +229,115 @@ export default function Page() {
       });
     }, 1000);
   }
+  
 
-  async function onGenerate() {
-    setError(null);
-    setApiResult(null);
-    setPolicyRefused(null);
-    setModelUsed(null);
-    setLimits(null);
+async function onGenerate() {
+  setError(null);
+  setApiResult(null);
+  setPolicyRefused(null);
+  setModelUsed(null);
+  setLimits(null);
 
-    // Start ad overlay immediately (but DO NOT wait to fire API)
-    if (needsVideoAd) startAdCountdown();
+  if (needsVideoAd) startAdCountdown();
+  setIsGenerating(true);
 
-    setIsGenerating(true);
+  
 
-    const payload = {
-      tool: selectedTool,
-      tier,
-      input: {
-        topic: topic.trim() || undefined,
-        course: course.trim() || undefined,
-        materials: materials,
-        userAnswer: userAnswer.trim() || undefined,
-        answerKey: answerKey.trim() || undefined,
-        constraints:
-          selectedTool === "planner" && examDate.trim()
-            ? { examDate: examDate.trim(), style: tier === "free" ? "concise" : "detailed" }
-            : { style: tier === "free" ? "concise" : "detailed" },
+  const payload = {
+    tool: selectedTool,
+    tier,
+    input: {
+      topic: topic.trim() || undefined,
+      course: course.trim() || undefined,
+      materials,
+      userAnswer: userAnswer.trim() || undefined,
+      answerKey: answerKey.trim() || undefined,
+      constraints:
+        selectedTool === "planner" && examDate.trim()
+          ? { examDate: examDate.trim(), style: tier === "free" ? "concise" : "detailed" }
+          : { style: tier === "free" ? "concise" : "detailed" },
+    },
+    meta: {
+      sessionId,
+      clientTs: Date.now(),
+    },
+  };
+
+  let res: Response;
+
+  try {
+    res = await fetch("/api/aceprep", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-aceprep-debug": "1",
       },
-      meta: {
-        sessionId,
-        clientTs: Date.now(),
-      },
-    };
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    });
+  } catch (e) {
+    console.log("FETCH THREW (never reached server):", e);
+    setError("Network error (request did not reach server).");
+    setIsGenerating(false);
+    return;
+  }
 
-    try {
-      const res = await fetch("/api/aceprep", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+  const rawText = await res.text();
+
+  let json: any = null;
+  try {
+    json = JSON.parse(rawText);
+  } catch {
+    // keep rawText
+  }
+
+  // IMPORTANT: use console.log to avoid Next devtools red error overlay noise
+  console.log("ACEPREP STATUS:", res.status);
+  console.log("ACEPREP RAW:", rawText);
+
+  if (!res.ok || json?.ok === false) {
+    // show the real server message in the UI
+    const msg =
+      json?.error ||
+      json?.message ||
+      json?.debug?.second?.message ||
+      json?.debug?.first?.message ||
+      rawText ||
+      `AcePrep failed (${res.status})`;
+
+    setError(msg);
+    setIsGenerating(false);
+    return;
+  }
+
+  // success path
+  setModelUsed(json.modelUsed ?? null);
+  setLimits(json.limits ?? null);
+
+  const cd = Number(json?.limits?.cooldownSeconds ?? 0);
+  if (cd > 0) startCooldown(cd);
+
+  const refused = !!json?.policy?.refused;
+  const reason = (json?.policy?.reason ?? null) as string | null;
+  setPolicyRefused({ refused, reason });
+
+  if (needsVideoAd) {
+    if (adRemaining !== 0) {
+      await new Promise<void>((resolve) => {
+        const t = window.setInterval(() => {
+          if (adRemaining === 0) {
+            window.clearInterval(t);
+            resolve();
+          }
+        }, 250);
       });
-
-      const json = await res.json();
-
-      if (!res.ok || json?.ok === false) {
-        const msg =
-          json?.error ||
-          json?.message ||
-          (res.status === 429 ? "You’re sending requests too fast. Please slow down." : "Something went wrong.");
-        setError(msg);
-        setIsGenerating(false);
-        return;
-      }
-
-      setModelUsed(json.modelUsed ?? null);
-      setLimits(json.limits ?? null);
-
-      // cooldown support
-      const cd = Number(json?.limits?.cooldownSeconds ?? 0);
-      if (cd > 0) startCooldown(cd);
-
-      // policy refusal support
-      const refused = !!json?.policy?.refused;
-      const reason = (json?.policy?.reason ?? null) as string | null;
-      setPolicyRefused({ refused, reason });
-
-      // Hold output until BOTH:
-      // - API returned
-      // - Ad finished (if free heavy)
-      if (needsVideoAd) {
-        // If ad already finished, show immediately
-        if (adRemaining === 0) {
-          setApiResult(json);
-          setIsGenerating(false);
-          return;
-        }
-
-        // Otherwise, wait for ad to finish
-        const waitForAd = () =>
-          new Promise<void>((resolve) => {
-            const t = window.setInterval(() => {
-              if (adRemaining === 0) {
-                window.clearInterval(t);
-                resolve();
-              }
-            }, 250);
-          });
-
-        await waitForAd();
-      }
-
-      setApiResult(json);
-      setIsGenerating(false);
-    } catch {
-      setError("Network error. Please retry.");
-      setIsGenerating(false);
     }
   }
+
+  setApiResult(json);
+  setIsGenerating(false);
+}
+
 
   async function copyOutput() {
     try {
@@ -330,12 +355,14 @@ export default function Page() {
     <main className="min-h-screen bg-background text-foreground">
       <StickyHeader tier={tier} setTier={setTier} />
 
-      <div className="mx-auto max-w-7xl px-4">
+            <div className="mx-auto max-w-7xl px-4">
         <div className="grid gap-6 xl:grid-cols-[220px_minmax(0,1fr)_220px]">
+          {/* LEFT RAIL */}
           <aside className="hidden xl:flex xl:flex-col gap-4 pt-10">
             <SideRailAds />
           </aside>
 
+          {/* CENTER CONTENT */}
           <div className="space-y-12">
             {/* Hero */}
             <section className="pt-14 sm:pt-18">
@@ -436,394 +463,350 @@ export default function Page() {
               </div>
             </section>
 
-            {/* Tool Panel + Ads */}
-            <section id="tools">
-              <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
-                {/* Main tool card */}
-                <Card className="rounded-3xl">
-            <CardHeader className="space-y-2">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <CardTitle className="text-xl">Try it now</CardTitle>
-                  <CardDescription>Pick a tool, paste your materials, and generate.</CardDescription>
-                </div>
+            {/* Tools */}
+            <section id="tools" className="pb-10">
+              <Card className="rounded-3xl">
+                <CardHeader className="space-y-2">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <CardTitle className="text-xl">Try it now</CardTitle>
+                      <CardDescription>Pick a tool, paste your materials, and generate.</CardDescription>
+                    </div>
 
-                {/* Tier toggle (MVP) */}
-                <div className="flex items-center gap-2">
-                  <Badge variant={tier === "free" ? "secondary" : "outline"} className="rounded-full px-3 py-1">
-                    {tier === "free" ? "Free" : "Pro"}
-                  </Badge>
-                  <div className="flex gap-1 rounded-2xl border p-1">
-                    <Button
-                      size="sm"
-                      variant={tier === "free" ? "default" : "ghost"}
-                      className="rounded-xl"
-                      onClick={() => setTier("free")}
-                    >
-                      Free
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={tier === "pro" ? "default" : "ghost"}
-                      className="rounded-xl"
-                      onClick={() => setTier("pro")}
-                    >
-                      Pro
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <ToolTabs selected={selectedTool} onSelect={setSelectedTool} />
-            </CardHeader>
-
-            <CardContent className="space-y-6">
-              {/* Inputs */}
-              <div className="grid gap-4">
-                <div className="grid gap-2">
-                  <label className="text-sm font-medium">Materials</label>
-                  <textarea
-                    className="min-h-[180px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                    placeholder="Paste lecture notes, slides text, or a problem description…"
-                    value={materials}
-                    onChange={(e) => setMaterials(e.target.value)}
-                  />
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>Tip: paste raw text from slides/notes for best results.</span>
-                    {modelUsed ? (
-                      <span className="rounded-full border px-2 py-0.5">Model: {modelUsed}</span>
-                    ) : (
-                      <span className="rounded-full border px-2 py-0.5">Model: (shown after generate)</span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <Field label="Course (optional)" value={course} onChange={setCourse} placeholder="ECE 201 — Digital Logic" />
-                  <Field label="Topic (optional)" value={topic} onChange={setTopic} placeholder="K-maps, FFs, FSMs…" />
-                </div>
-
-                {selectedTool === "planner" ? (
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <Field
-                      label="Exam date (required)"
-                      value={examDate}
-                      onChange={setExamDate}
-                      placeholder="YYYY-MM-DD"
-                      type="date"
-                    />
-                    <div className="rounded-2xl border p-3 text-sm text-muted-foreground">
-                      <p className="font-medium text-foreground">MVP note</p>
-                      <p className="mt-1">
-                        Time blocks upload comes later. For now, we’ll build a week plan from your materials + date.
-                      </p>
+                    {/* Tier toggle */}
+                    <div className="flex items-center gap-2">
+                      <Badge variant={tier === "free" ? "secondary" : "outline"} className="rounded-full px-3 py-1">
+                        {tier === "free" ? "Free" : "Pro"}
+                      </Badge>
+                      <div className="flex gap-1 rounded-2xl border p-1">
+                        <Button
+                          size="sm"
+                          variant={tier === "free" ? "default" : "ghost"}
+                          className="rounded-xl"
+                          onClick={() => setTier("free")}
+                        >
+                          Free
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={tier === "pro" ? "default" : "ghost"}
+                          className="rounded-xl"
+                          onClick={() => setTier("pro")}
+                        >
+                          Pro
+                        </Button>
+                      </div>
                     </div>
                   </div>
-                ) : null}
 
-                {selectedTool === "reviewer" ? (
+                  <ToolTabs selected={selectedTool} onSelect={setSelectedTool} />
+                </CardHeader>
+
+                <CardContent className="space-y-6">
+                  {/* Inputs */}
                   <div className="grid gap-4">
                     <div className="grid gap-2">
-                      <label className="text-sm font-medium">Your answer (required)</label>
+                      <label className="text-sm font-medium">Materials</label>
                       <textarea
-                        className="min-h-[120px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                        placeholder="Paste what you wrote / your solution attempt…"
-                        value={userAnswer}
-                        onChange={(e) => setUserAnswer(e.target.value)}
+                        className="min-h-[180px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                        placeholder="Paste lecture notes, slides text, or a problem description…"
+                        value={materials}
+                        onChange={(e) => setMaterials(e.target.value)}
                       />
-                      <p className="text-xs text-muted-foreground">
-                        If you don’t provide an answer key, AcePrep will give hints/checks but won’t dump final answers.
-                      </p>
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>Tip: paste raw text from slides/notes for best results.</span>
+                        {modelUsed ? (
+                          <span className="rounded-full border px-2 py-0.5">Model: {modelUsed}</span>
+                        ) : (
+                          <span className="rounded-full border px-2 py-0.5">Model: (shown after generate)</span>
+                        )}
+                      </div>
                     </div>
 
-                    <div className="grid gap-2">
-                      <label className="text-sm font-medium">Answer key (optional)</label>
-                      <textarea
-                        className="min-h-[90px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                        placeholder="Paste the official solution / answer key (optional)…"
-                        value={answerKey}
-                        onChange={(e) => setAnswerKey(e.target.value)}
-                      />
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <Field label="Course (optional)" value={course} onChange={setCourse} placeholder="ECE 201 — Digital Logic" />
+                      <Field label="Topic (optional)" value={topic} onChange={setTopic} placeholder="K-maps, FFs, FSMs…" />
+                    </div>
+
+                    {selectedTool === "planner" ? (
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <Field
+                          label="Exam date (required)"
+                          value={examDate}
+                          onChange={setExamDate}
+                          placeholder="YYYY-MM-DD"
+                          type="date"
+                        />
+                        <div className="rounded-2xl border p-3 text-sm text-muted-foreground">
+                          <p className="font-medium text-foreground">MVP note</p>
+                          <p className="mt-1">Time blocks upload comes later. For now, we’ll build a week plan from your materials + date.</p>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {selectedTool === "reviewer" ? (
+                      <div className="grid gap-4">
+                        <div className="grid gap-2">
+                          <label className="text-sm font-medium">Your answer (required)</label>
+                          <textarea
+                            className="min-h-[120px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                            placeholder="Paste what you wrote / your solution attempt…"
+                            value={userAnswer}
+                            onChange={(e) => setUserAnswer(e.target.value)}
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            If you don’t provide an answer key, AcePrep will give hints/checks but won’t dump final answers.
+                          </p>
+                        </div>
+
+                        <div className="grid gap-2">
+                          <label className="text-sm font-medium">Answer key (optional)</label>
+                          <textarea
+                            className="min-h-[90px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                            placeholder="Paste the official solution / answer key (optional)…"
+                            value={answerKey}
+                            onChange={(e) => setAnswerKey(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {selectedTool === "essay_proofread" ? (
+                      <div className="grid gap-2">
+                        <label className="text-sm font-medium">Essay text (required)</label>
+                        <textarea
+                          className="min-h-[160px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                          placeholder="Paste your essay draft…"
+                          value={userAnswer}
+                          onChange={(e) => setUserAnswer(e.target.value)}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Controls */}
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="secondary" className="rounded-full">
+                        Tool: {toolMeta.short}
+                      </Badge>
+                      <Badge variant={isHeavyTool ? "outline" : "secondary"} className="rounded-full">
+                        {isHeavyTool ? "Heavy tool" : "Light tool"}
+                      </Badge>
+
+                      {limits ? (
+                        <Badge variant="outline" className="rounded-full">
+                          Remaining today: {limits.remainingToday}
+                        </Badge>
+                      ) : null}
+
+                      {cooldownRemaining > 0 ? (
+                        <Badge variant="outline" className="rounded-full">
+                          <Timer className="mr-1 h-3.5 w-3.5" />
+                          Cooldown: {cooldownRemaining}s
+                        </Badge>
+                      ) : null}
+                    </div>
+
+                    <div className="flex gap-2">
+                      <Button onClick={onGenerate} disabled={!canGenerate} className="rounded-2xl" size="lg">
+                        {isGenerating ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            Generating…
+                          </>
+                        ) : tier === "free" && isHeavyTool ? (
+                          <>
+                            Generate (watch ad) <ArrowRight className="ml-2 h-4 w-4" />
+                          </>
+                        ) : (
+                          <>
+                            Generate <ArrowRight className="ml-2 h-4 w-4" />
+                          </>
+                        )}
+                      </Button>
+
+                      <Button
+                        variant="outline"
+                        className="rounded-2xl"
+                        size="lg"
+                        onClick={() => {
+                          setApiResult(null);
+                          setError(null);
+                          setPolicyRefused(null);
+                          setModelUsed(null);
+                          setLimits(null);
+                        }}
+                      >
+                        Reset
+                      </Button>
                     </div>
                   </div>
-                ) : null}
 
-                {selectedTool === "essay_proofread" ? (
-                  <div className="grid gap-2">
-                    <label className="text-sm font-medium">Essay text (required)</label>
-                    <textarea
-                      className="min-h-[160px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                      placeholder="Paste your essay draft…"
-                      value={userAnswer}
-                      onChange={(e) => setUserAnswer(e.target.value)}
-                    />
-                  </div>
-                ) : null}
-              </div>
+                  {/* Output placeholder */}
+                  <div id="how" className="space-y-3">
+  {/* Output header */}
+  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+    <div className="space-y-1">
+      <p className="text-sm font-semibold">Generated output</p>
+      <p className="text-xs text-muted-foreground">
+        {policyRefused?.refused
+          ? "Blocked by ethics guardrails."
+          : apiResult?.data
+            ? "Review, copy, or export."
+            : "Generate to see results here."}
+      </p>
+    </div>
 
-              {/* Controls / Limits */}
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="secondary" className="rounded-full">
-                    Tool: {toolMeta.short}
-                  </Badge>
-                  <Badge variant={isHeavyTool ? "outline" : "secondary"} className="rounded-full">
-                    {isHeavyTool ? "Heavy tool" : "Light tool"}
-                  </Badge>
+    <div className="flex flex-wrap items-center gap-2">
+      <Button
+        variant="outline"
+        className="rounded-2xl"
+        onClick={copyOutput}
+        disabled={!apiResult?.data}
+      >
+        <Clipboard className="mr-2 h-4 w-4" />
+        Copy JSON
+      </Button>
 
-                  {limits ? (
-                    <Badge variant="outline" className="rounded-full">
-                      Remaining today: {limits.remainingToday}
-                    </Badge>
-                  ) : null}
+      <ExportButtons tier={tier} enabled={!!apiResult?.data} />
+    </div>
+  </div>
 
-                  {cooldownRemaining > 0 ? (
-                    <Badge variant="outline" className="rounded-full">
-                      <Timer className="mr-1 h-3.5 w-3.5" />
-                      Cooldown: {cooldownRemaining}s
-                    </Badge>
-                  ) : null}
-                </div>
+  {/* Output body */}
+  {isGenerating ? (
+    <SkeletonOutput />
+  ) : error ? (
+    <ErrorCard message={error} onRetry={onGenerate} />
+  ) : policyRefused?.refused ? (
+    <RefusalCard reason={policyRefused.reason} selectedTool={selectedTool} />
+  ) : apiResult?.data ? (
+    <OutputRenderer tool={selectedTool} data={apiResult.data} />
+  ) : (
+    <Card className="rounded-3xl">
+      <CardContent className="p-6 text-sm text-muted-foreground">
+        Paste materials above and click <span className="font-medium text-foreground">Generate</span>.
+      </CardContent>
+    </Card>
+  )}
+</div>
 
-                <div className="flex gap-2">
-                  <Button
-                    onClick={onGenerate}
-                    disabled={!canGenerate}
-                    className="rounded-2xl"
-                    size="lg"
-                  >
-                    {isGenerating ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Generating…
-                      </>
-                    ) : tier === "free" && isHeavyTool ? (
-                      <>
-                        Generate (watch ad)
-                        <ArrowRight className="ml-2 h-4 w-4" />
-                      </>
-                    ) : (
-                      <>
-                        Generate
-                        <ArrowRight className="ml-2 h-4 w-4" />
-                      </>
-                    )}
-                  </Button>
-
-                  <Button
-                    variant="outline"
-                    className="rounded-2xl"
-                    size="lg"
-                    onClick={() => {
-                      setApiResult(null);
-                      setError(null);
-                      setPolicyRefused(null);
-                      setModelUsed(null);
-                      setLimits(null);
-                    }}
-                  >
-                    Reset
-                  </Button>
-                </div>
-              </div>
-
-              {/* Below panel ads (2 horizontal slots) */}
-              {showStationaryAds ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-                </div>
-              ) : null}
-
-              {/* Output */}
-              <div id="how" className="space-y-3">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold">Output</h3>
-                    <p className="text-sm text-muted-foreground">
-                      Structured sections. Copy is free; exports are Pro.
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" className="rounded-2xl" onClick={copyOutput} disabled={!apiResult?.data}>
-                      <Clipboard className="mr-2 h-4 w-4" />
-                      Copy
-                    </Button>
-
-                    <ExportButtons tier={tier} enabled={!!apiResult?.data} />
-                  </div>
-                </div>
-
-                {error ? <ErrorCard message={error} onRetry={canGenerate ? onGenerate : undefined} /> : null}
-
-                {isGenerating && !apiResult ? <SkeletonOutput /> : null}
-
-                {apiResult?.policy?.refused ? (
-                  <RefusalCard reason={apiResult?.policy?.reason ?? null} selectedTool={selectedTool} />
-                ) : null}
-
-                {apiResult?.data && !apiResult?.policy?.refused ? (
-                  <OutputRenderer tool={selectedTool} data={apiResult.data} />
-                ) : null}
-
-                {!apiResult && !isGenerating && !error ? (
-                  <Card className="rounded-3xl">
-                    <CardContent className="p-6 text-sm text-muted-foreground">
-                      Paste your materials above and click <span className="font-medium text-foreground">Generate</span>.
-                      <div className="mt-2 text-xs">
-                        {tier === "free" && isHeavyTool ? "Free heavy tools show a short ad during generation." : "Pro is ad-free."}
-                      </div>
-                    </CardContent>
-                  </Card>
-                ) : null}
-              </div>
-            </CardContent>
-          </Card>
-
-                {/* Right sidebar ads (2) */}
-                <div className="space-y-6">
-                  <Card className="rounded-3xl">
-                    <CardHeader>
-                      <CardTitle className="text-base">Upgrade</CardTitle>
-                      <CardDescription>No ads, higher limits, exports.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <div className="flex items-center gap-2 text-sm">
-                        <Crown className="h-4 w-4" />
-                        Pro: $6.99/mo (recommended)
-                      </div>
-                      <Button className="w-full rounded-2xl" asChild>
-                        <Link href="#pricing">See Pro details</Link>
-                      </Button>
-                      <p className="text-xs text-muted-foreground">{BRAND_LINE}</p>
-                    </CardContent>
-                  </Card>
-
-                  {showStationaryAds ? (
-                    <>
-                      <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
-                      <StationaryAdSlot title="Ad" subtitle="Sponsored" tall />
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            </section>
-
-            {/* Ethics */}
-            <section id="ethics">
-              <Card className="rounded-3xl">
-                <CardHeader>
-                  <CardTitle className="text-2xl">Built ethically. On purpose.</CardTitle>
-                  <CardDescription>Designed for learning — not shortcuts.</CardDescription>
-                </CardHeader>
-                <CardContent className="grid gap-6 md:grid-cols-2">
-                  <ul className="space-y-3 text-sm">
-                    <li className="flex items-start gap-2">
-                      <Shield className="mt-0.5 h-4 w-4" />
-                      <span>
-                        <span className="font-medium">No cheating / no answer dumping.</span> We help you understand and
-                        practice.
-                      </span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <Shield className="mt-0.5 h-4 w-4" />
-                      <span>
-                        <span className="font-medium">No hate, harassment, or illegal content.</span> Guardrails stay on.
-                      </span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <Shield className="mt-0.5 h-4 w-4" />
-                      <span>
-                        <span className="font-medium">Transparent AI usage.</span> We show model used in the response
-                        metadata.
-                      </span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <Shield className="mt-0.5 h-4 w-4" />
-                      <span>
-                        <span className="font-medium">Designed for learning.</span> Active recall, ordering, and practice
-                        prompts.
-                      </span>
-                    </li>
-                  </ul>
-
-                  <Card className="rounded-3xl">
-                    <CardHeader>
-                      <CardTitle className="text-base">Why we show ads</CardTitle>
-                      <CardDescription>Short ads keep AcePrep free for students.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <p className="text-sm text-muted-foreground">
-                        We only show ads on heavy tools so you can still generate study materials without paying.
-                      </p>
-                      <Button className="w-full rounded-2xl" asChild>
-                        <Link href="#pricing">Compare plans</Link>
-                      </Button>
-                    </CardContent>
-                  </Card>
                 </CardContent>
               </Card>
             </section>
-
-            {/* Pricing */}
-            <section id="pricing" className="pb-16">
-              <div className="mb-6 space-y-2">
-                <h2 className="text-3xl font-semibold tracking-tight">Pricing</h2>
-                <p className="text-muted-foreground">Simple, student-friendly.</p>
-              </div>
-
-              <div className="grid gap-5 lg:grid-cols-2">
-                <PricingCard
-                  title="Free"
-                  price="$0"
-                  subtitle="Ads supported"
-                  bullets={[
-                    "Core tools",
-                    "Heavy tools: ads during generation",
-                    "10 heavy generations/day",
-                    "Copy output",
-                    "Limited history (MVP)",
-                  ]}
-                  ctaLabel="Keep using Free"
-                  ctaHref="#tools"
-                  variant="outline"
-                />
-
-                <PricingCard
-                  title="Pro"
-                  price="$6.99/mo"
-                  subtitle="Ad-free + exports"
-                  bullets={[
-                    "No ads",
-                    "Higher limits",
-                    "Faster feel (UX)",
-                    "Saved Study Caves (MVP stub)",
-                    "Exports: PDF / Notion / Anki CSV (MVP stub)",
-                  ]}
-                  ctaLabel="Choose Pro"
-                  ctaHref="/checkout?plan=pro"
-                  variant="default"
-                  highlight
-                />
-              </div>
-
-              {/* Footer ads (2) */}
-              {showStationaryAds ? (
-                <div className="mt-8 grid gap-3 sm:grid-cols-2">
-                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-                  <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-                </div>
-              ) : null}
-
-              <Footer />
-            </section>
           </div>
 
+          {/* RIGHT RAIL (keeps the 3-col grid valid) */}
           <aside className="hidden xl:flex xl:flex-col gap-4 pt-10">
             <SideRailAds showUpsell />
           </aside>
         </div>
       </div>
+
+
+      {/* Ethics */}
+      <section id="ethics" className="mx-auto max-w-6xl px-4 pb-12">
+        <Card className="rounded-3xl">
+          <CardHeader>
+            <CardTitle className="text-2xl">Built ethically. On purpose.</CardTitle>
+            <CardDescription>Designed for learning — not shortcuts.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-6 md:grid-cols-2">
+            <ul className="space-y-3 text-sm">
+              <li className="flex items-start gap-2">
+                <Shield className="mt-0.5 h-4 w-4" />
+                <span>
+                  <span className="font-medium">No cheating / no answer dumping.</span> We help you understand and practice.
+                </span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Shield className="mt-0.5 h-4 w-4" />
+                <span>
+                  <span className="font-medium">No hate, harassment, or illegal content.</span> Guardrails stay on.
+                </span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Shield className="mt-0.5 h-4 w-4" />
+                <span>
+                  <span className="font-medium">Transparent AI usage.</span> We show model used in the response metadata.
+                </span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Shield className="mt-0.5 h-4 w-4" />
+                <span>
+                  <span className="font-medium">Designed for learning.</span> Active recall, ordering, and practice prompts.
+                </span>
+              </li>
+            </ul>
+
+            <Card className="rounded-3xl">
+              <CardHeader>
+                <CardTitle className="text-base">Ad-free studying</CardTitle>
+                <CardDescription>Remove the 15s overlay and unlock exports.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <Button className="w-full rounded-2xl" asChild>
+                  <Link href="#pricing">Upgrade to Pro</Link>
+                </Button>
+                <p className="text-xs text-muted-foreground">Free tier is supported by ads on heavy tools.</p>
+              </CardContent>
+            </Card>
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* Pricing */}
+      <section id="pricing" className="mx-auto max-w-6xl px-4 pb-16">
+        <div className="mb-6 space-y-2">
+          <h2 className="text-3xl font-semibold tracking-tight">Pricing</h2>
+          <p className="text-muted-foreground">Simple, student-friendly.</p>
+        </div>
+
+        <div className="grid gap-5 lg:grid-cols-2">
+          <PricingCard
+            title="Free"
+            price="$0"
+            subtitle="Ads supported"
+            bullets={[
+              "Core tools",
+              "Heavy tools: ads during generation",
+              "10 heavy generations/day",
+              "Copy output",
+              "Limited history (MVP)",
+            ]}
+            ctaLabel="Keep using Free"
+            ctaHref="#tools"
+            variant="outline"
+          />
+
+          <PricingCard
+            title="Pro"
+            price="$6.99/mo"
+            subtitle="Ad-free + exports"
+            bullets={[
+              "No ads",
+              "Higher limits",
+              "Faster feel (UX)",
+              "Saved Study Caves (MVP stub)",
+              "Exports: PDF / Notion / Anki CSV (MVP stub)",
+            ]}
+            ctaLabel="Go Pro"
+            ctaHref="/checkout?plan=pro"
+            variant="default"
+            highlight
+          />
+        </div>
+
+        {/* Footer ads (2) */}
+        {showStationaryAds ? (
+          <div className="mt-8 grid gap-3 sm:grid-cols-2">
+            <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+            <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+          </div>
+        ) : null}
+
+        <Footer />
+      </section>
 
       {/* Video ad overlay */}
       {showGeneratingOverlay || showAdOverlay ? (

@@ -8,6 +8,96 @@ export const dynamic = "force-dynamic";
 
 /**
  * -----------------------------
+ * 0) CORS (Fixes "network error" from browser)
+ * -----------------------------
+ */
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "https://aceprep.me",
+  "https://www.aceprep.me",
+  // add Vercel preview domains if needed
+];
+
+function sanitizeText(s: string) {
+  // Remove ASCII control chars except \n \r \t
+  return s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+}
+
+function corsHeaders(req: Request) {
+  const origin = req.headers.get("origin") || "";
+const isAllowed =
+  ALLOWED_ORIGINS.includes(origin) || origin.endsWith(".vercel.app");
+
+  const requestedHeaders = req.headers.get("access-control-request-headers");
+  const allowHeaders =
+    requestedHeaders || "Content-Type, Authorization, X-Aceprep-Debug";
+
+  const base: Record<string, string> = {
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": allowHeaders,
+    "Access-Control-Max-Age": "86400",
+    Vary: "Origin, Access-Control-Request-Headers",
+  };
+
+  // ✅ THIS is the missing part
+if (isAllowed && origin) {
+  base["Access-Control-Allow-Origin"] = origin;
+}
+  return base;
+}
+function dumpError(e: any) {
+  const safeStringify = (obj: any) => {
+    try {
+      return JSON.parse(
+        JSON.stringify(obj, Object.getOwnPropertyNames(obj))
+      );
+    } catch {
+      return String(obj);
+    }
+  };
+
+  const cause = e?.cause;
+
+  return {
+    name: e?.name,
+    message: e?.message,
+    status: e?.status,
+    code: e?.code,
+
+    // the AI SDK usually stores provider details here:
+    cause: cause ? safeStringify(cause) : null,
+
+    // also dump the error itself (often has hidden fields):
+    self: safeStringify(e),
+  };
+}
+
+
+
+function json(
+  req: Request,
+  body: any,
+  status = 200,
+  extraHeaders: Record<string, string> = {}
+) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      ...corsHeaders(req),
+      ...extraHeaders,
+    },
+  });
+}
+
+// Preflight
+export async function OPTIONS(req: Request) {
+  return new Response(null, { status: 204, headers: corsHeaders(req) });
+}
+
+/**
+ * -----------------------------
  * 1) Constants / Config
  * -----------------------------
  */
@@ -100,7 +190,7 @@ const RequestSchema = z.object({
 
 /**
  * -----------------------------
- * 4) Tool Output Schemas (Structured Outputs)
+ * 4) Tool Output Schemas
  * -----------------------------
  */
 const StudyGuideSchema = z.object({
@@ -112,13 +202,14 @@ const StudyGuideSchema = z.object({
         keyConcepts: z.array(z.string()).min(1),
         misconceptions: z.array(z.string()).min(1),
         practiceQuestions: z
-          .array(
-            z.object({
-              question: z.string(),
-              type: z.enum(["concept", "calculation", "application", "mixed"]).optional(),
-            })
-          )
-          .min(3),
+  .array(
+    z.object({
+      question: z.string(),
+      type: z.enum(["concept", "calculation", "application", "mixed"]),
+    })
+  )
+  .min(3),
+
       })
     )
     .min(1),
@@ -207,7 +298,15 @@ const EssayProofreadSchema = z.object({
   issues: z
     .array(
       z.object({
-        type: z.enum(["grammar", "clarity", "structure", "argument", "tone", "citation", "other"]),
+        type: z.enum([
+          "grammar",
+          "clarity",
+          "structure",
+          "argument",
+          "tone",
+          "citation",
+          "other",
+        ]),
         severity: z.enum(["low", "medium", "high"]),
         note: z.string(),
         suggestion: z.string().optional(),
@@ -244,8 +343,9 @@ function schemaForTool(tool: Tool) {
  * 5) Helpers: IP, Limits, Guardrails
  * -----------------------------
  */
+
 async function getIP(): Promise<string> {
-  const h = await headers(); // ✅ await fixes h.get(...)
+  const h = await headers();
   const xff = h.get("x-forwarded-for");
   if (xff) return xff.split(",")[0]?.trim() || "unknown";
   const realIp = h.get("x-real-ip");
@@ -287,7 +387,10 @@ function getFreeHeavyLimits(sessionId: string) {
     dailyStore.set(key, { dateKey, heavyCount: 0 });
     return { used: 0, remaining: FREE_HEAVY_DAILY_LIMIT };
   }
-  return { used: st.heavyCount, remaining: Math.max(0, FREE_HEAVY_DAILY_LIMIT - st.heavyCount) };
+  return {
+    used: st.heavyCount,
+    remaining: Math.max(0, FREE_HEAVY_DAILY_LIMIT - st.heavyCount),
+  };
 }
 
 function incrementFreeHeavy(sessionId: string) {
@@ -330,7 +433,9 @@ function detectJailbreak(text: string): boolean {
 
 function detectHate(text: string): boolean {
   const t = text.toLowerCase();
-  return ["kill all ", "exterminate ", "racial superiority", "inferior race"].some((p) => t.includes(p));
+  return ["kill all ", "exterminate ", "racial superiority", "inferior race"].some(
+    (p) => t.includes(p)
+  );
 }
 
 function detectIllegal(text: string): boolean {
@@ -364,7 +469,7 @@ function detectAcademicDishonesty(input: z.infer<typeof InputSchema>): boolean {
 
 /**
  * -----------------------------
- * 6) Prompting (Anti-jailbreak + Tool-specific)
+ * 6) Prompting
  * -----------------------------
  */
 function baseSystemPrompt(tool: Tool, tier: Tier, hasAnswerKey: boolean) {
@@ -407,18 +512,16 @@ function userPrompt(tool: Tool, input: z.infer<typeof InputSchema>) {
 
 /**
  * -----------------------------
- * 7) Model Routing (Your Spec)
+ * 7) Model Routing
  * -----------------------------
  */
-const MODEL_HEAVY = "gpt-4.1-mini";
-const MODEL_CHEAP = "gpt-3.5-turbo";
+const MODEL_HEAVY = "gpt-5-mini";
+const MODEL_CHEAP = "gpt-5-nano";
 
 function pickModel(tool: Tool) {
-  // Heavy tools -> 4.1-mini
   if (HEAVY_TOOLS.has(tool)) {
     return { providerModelId: MODEL_HEAVY, reportModelUsed: `openai/${MODEL_HEAVY}` };
   }
-  // Cheap tools -> 3.5-turbo
   return { providerModelId: MODEL_CHEAP, reportModelUsed: `openai/${MODEL_CHEAP}` };
 }
 
@@ -466,43 +569,6 @@ function okResponse(params: {
   };
 }
 
-function formatGenerationError(err: unknown) {
-  if (!err || typeof err !== "object") return null;
-  const typed = err as {
-    name?: string;
-    message?: string;
-    code?: string;
-    status?: number;
-    cause?: { name?: string; message?: string; code?: string } | string;
-  };
-  const causeMessage =
-    typeof typed.cause === "string"
-      ? typed.cause
-      : typed.cause?.message
-      ? `${typed.cause.name ?? "Cause"}: ${typed.cause.message}`
-      : null;
-
-  return {
-    name: typed.name ?? "Error",
-    message: typed.message ?? "Unknown error",
-    code: typed.code ?? null,
-    status: typeof typed.status === "number" ? typed.status : null,
-    cause: causeMessage,
-  };
-}
-
-function errResponse(message: string, details?: Record<string, unknown> | null, status = 500) {
-  return new Response(
-    JSON.stringify({
-      ok: false,
-      error: message,
-      hint: "Please retry in a moment.",
-      details: details ?? null,
-    }),
-    { status, headers: { "Content-Type": "application/json" } }
-  );
-}
-
 /**
  * -----------------------------
  * 9) POST Handler
@@ -516,31 +582,24 @@ export async function POST(req: Request) {
   try {
     const ct = req.headers.get("content-type") || "";
     if (!ct.includes("application/json")) {
-      return new Response(JSON.stringify({ ok: false, error: "Content-Type must be application/json" }), {
-        status: 415,
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(req, { ok: false, error: "Content-Type must be application/json" }, 415);
     }
 
-    if (!process.env.OPENAI_API_KEY) return errResponse("Server is missing OPENAI_API_KEY.");
+    if (!process.env.OPENAI_API_KEY) {
+      return json(req, { ok: false, error: "Server is missing OPENAI_API_KEY." }, 500);
+    }
 
     const raw = await req.json();
     const parsed = RequestSchema.safeParse(raw);
     if (!parsed.success) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "Invalid request body", details: parsed.error.flatten() }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return json(req, { ok: false, error: "Invalid request body", details: parsed.error.flatten() }, 400);
     }
 
     const { tool, tier, input, meta } = parsed.data;
 
     const sessionId = meta.sessionId?.trim();
     if (!sessionId || sessionId.length < BOT_MIN_SESSIONID_LEN) {
-      return new Response(JSON.stringify({ ok: false, error: "Missing or invalid sessionId" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+      return json(req, { ok: false, error: "Missing or invalid sessionId" }, 400);
     }
 
     // Rate limit by IP + sessionId
@@ -548,102 +607,103 @@ export async function POST(req: Request) {
 
     // Payload caps
     if ((input.materials || "").length > MATERIALS_MAX_CHARS) {
-      return new Response(
-        JSON.stringify({ ok: false, error: `materials too large (max ${MATERIALS_MAX_CHARS} chars)` }),
-        { status: 413, headers: { "Content-Type": "application/json" } }
-      );
+      return json(req, { ok: false, error: `materials too large (max ${MATERIALS_MAX_CHARS} chars)` }, 413);
     }
+const cleanInput = {
+  ...input,
+  materials: sanitizeText(input.materials ?? ""),
+  topic: input.topic ? sanitizeText(input.topic) : input.topic,
+  course: input.course ? sanitizeText(input.course) : input.course,
+  userAnswer: input.userAnswer ? sanitizeText(input.userAnswer) : input.userAnswer,
+  answerKey: input.answerKey ? sanitizeText(input.answerKey) : input.answerKey,
+};
 
     const combinedText =
       `${tool}\n${tier}\n${input.topic ?? ""}\n${input.course ?? ""}\n` +
       `${input.materials ?? ""}\n${input.userAnswer ?? ""}\n${input.answerKey ?? ""}`;
 
-    // Anti-jailbreak and guardrails
+    // Guardrails
     if (detectJailbreak(combinedText)) {
       const latencyMs = Date.now() - start;
       const base = refusal("jailbreak patterns detected", "jailbreak");
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: base.data,
-            refused: true,
-            reason: base.policy.reason,
-            showAd: false,
-            remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
-            cooldownSeconds: 0,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: base.data,
+          refused: true,
+          reason: base.policy.reason,
+          showAd: false,
+          remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
+          cooldownSeconds: 0,
+          latencyMs,
+        }),
+        200
       );
     }
 
     if (detectHate(combinedText)) {
       const latencyMs = Date.now() - start;
       const base = refusal("hate content", "hate");
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: base.data,
-            refused: true,
-            reason: base.policy.reason,
-            showAd: false,
-            remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
-            cooldownSeconds: 0,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: base.data,
+          refused: true,
+          reason: base.policy.reason,
+          showAd: false,
+          remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
+          cooldownSeconds: 0,
+          latencyMs,
+        }),
+        200
       );
     }
 
     if (detectIllegal(combinedText)) {
       const latencyMs = Date.now() - start;
       const base = refusal("illegal instructions", "illegal");
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: base.data,
-            refused: true,
-            reason: base.policy.reason,
-            showAd: false,
-            remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
-            cooldownSeconds: 0,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: base.data,
+          refused: true,
+          reason: base.policy.reason,
+          showAd: false,
+          remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
+          cooldownSeconds: 0,
+          latencyMs,
+        }),
+        200
       );
     }
 
     if (detectAcademicDishonesty(input)) {
       const latencyMs = Date.now() - start;
       const base = refusal("academic dishonesty request", "dishonesty");
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: base.data,
-            refused: true,
-            reason: base.policy.reason,
-            showAd: false,
-            remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
-            cooldownSeconds: 0,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: base.data,
+          refused: true,
+          reason: base.policy.reason,
+          showAd: false,
+          remainingToday: tier === "free" ? getFreeHeavyLimits(sessionId).remaining : 9999,
+          cooldownSeconds: 0,
+          latencyMs,
+        }),
+        200
       );
     }
 
@@ -653,22 +713,21 @@ export async function POST(req: Request) {
 
     if (tier === "free" && isHeavy && remainingToday <= 0) {
       const latencyMs = Date.now() - start;
-      return new Response(
-        JSON.stringify(
-          okResponse({
-            tool,
-            tier,
-            modelUsed: "none",
-            data: { message: `You’ve hit today’s free limit for heavy tools. Please wait and try again.\n\n${BRAND_LINE}` },
-            refused: false,
-            reason: null,
-            showAd: true,
-            remainingToday: 0,
-            cooldownSeconds: FREE_COOLDOWN_SECONDS,
-            latencyMs,
-          })
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+      return json(
+        req,
+        okResponse({
+          tool,
+          tier,
+          modelUsed: "none",
+          data: { message: `You’ve hit today’s free limit for heavy tools. Please wait and try again.\n\n${BRAND_LINE}` },
+          refused: false,
+          reason: null,
+          showAd: true,
+          remainingToday: 0,
+          cooldownSeconds: FREE_COOLDOWN_SECONDS,
+          latencyMs,
+        }),
+        200
       );
     }
 
@@ -679,7 +738,6 @@ export async function POST(req: Request) {
     const schema = schemaForTool(tool);
 
     const attempt = async () => {
-      // Special-case reviewer so TypeScript knows the schema
       if (tool === "reviewer") {
         const res = await generateObject({
           model: openai(providerModelId),
@@ -689,41 +747,56 @@ export async function POST(req: Request) {
           temperature: 0.2,
         });
 
-        // Enforce rule when no answerKey
-        if (!hasAnswerKey) {
-          // res.object is already typed as ReviewerSchema output
-          if (res.object.finalAnswerProvided !== false) {
-            res.object.finalAnswerProvided = false;
-          }
+        if (!hasAnswerKey && res.object.finalAnswerProvided !== false) {
+          res.object.finalAnswerProvided = false;
         }
         return res;
       }
 
-      // All other tools
-      const res = await generateObject({
+      return await generateObject({
         model: openai(providerModelId),
         schema,
         system: sys,
         prompt,
         temperature: 0.2,
       });
-
-      return res;
     };
 
-
     let result: Awaited<ReturnType<typeof attempt>> | null = null;
-    try {
-      result = await attempt();
-    } catch (err) {
-      // retry once if invalid/failure
-      try {
-        result = await attempt();
-      } catch (retryErr) {
-        const details = formatGenerationError(retryErr) ?? formatGenerationError(err);
-        return errResponse("Generation failed. Please retry.", details, 502);
-      }
-    }
+
+try {
+  result = await attempt();
+} catch (e1: any) {
+  try {
+    result = await attempt();
+  } catch (e2: any) {
+  const d1 = dumpError(e1);
+  const d2 = dumpError(e2);
+
+  console.error("ACEPREP AI CALL FAILED (1):", d1);
+  console.error("ACEPREP AI CALL FAILED (2):", d2);
+
+  return json(
+    req,
+    {
+      ok: false,
+      error: "Generation failed. Please retry.",
+      debug: debugEnabled
+        ? {
+            providerModelId,
+            reportModelUsed,
+            first: d1,
+            second: d2,
+          }
+        : undefined,
+    },
+    500
+  );
+}
+
+
+}
+
 
     // Increment free heavy usage
     if (tier === "free" && isHeavy) {
@@ -733,42 +806,52 @@ export async function POST(req: Request) {
 
     const latencyMs = Date.now() - start;
     const showAd = tier === "free" && isHeavy;
-
-    // Don’t log materials; return minimal usage if available
     const usage = (result as any)?.usage ?? null;
 
-    return new Response(
-      JSON.stringify(
-        okResponse({
-          tool,
-          tier,
-          modelUsed: reportModelUsed, // returns "openai/..."
-          data: result!.object,
-          refused: false,
-          reason: null,
-          showAd,
-          remainingToday: tier === "free" && isHeavy ? remainingToday : 9999,
-          cooldownSeconds: 0,
-          latencyMs,
-          usage,
-        })
-      ),
-      { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } }
+    return json(
+      req,
+      okResponse({
+        tool,
+        tier,
+        modelUsed: reportModelUsed,
+        data: result!.object,
+        refused: false,
+        reason: null,
+        showAd,
+        remainingToday: tier === "free" && isHeavy ? remainingToday : 9999,
+        cooldownSeconds: 0,
+        latencyMs,
+        usage,
+      }),
+      200
     );
   } catch (err: any) {
-    if (err?.status === 429) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "Too many requests. Please slow down.", retryAfterSeconds: err.retryAfter ?? 30 }),
-        {
-          status: 429,
-          headers: {
-            "Content-Type": "application/json",
-            "Retry-After": String(err.retryAfter ?? 30),
-          },
+  const isRate = err?.status === 429;
+  const status = isRate ? 429 : 500;
+
+  const debug =
+    req.headers.get("x-aceprep-debug") === "1" ||
+    process.env.NODE_ENV !== "production"
+      ? {
+          name: err?.name,
+          message: err?.message,
+          status: err?.status,
         }
-      );
-    }
-    const details = formatGenerationError(err);
-    return errResponse("Unexpected error. Please retry.", details);
-  }
+      : undefined;
+
+  return json(
+    req,
+    {
+      ok: false,
+      error: isRate ? "Too many requests. Please slow down." : "Unexpected error. Please retry.",
+      debug,
+    },
+    status,
+    isRate ? { "Retry-After": String(err.retryAfter ?? 30) } : {}
+  );
+}
+}
+
+export async function GET(req: Request) {
+  return json(req, { ok: true, message: "AcePrep API is running. Use POST /api/aceprep." }, 200);
 }
