@@ -40,38 +40,33 @@ if (isAllowed && origin) {
 }
   return base;
 }
+function dumpError(e: any) {
+  const safeStringify = (obj: any) => {
+    try {
+      return JSON.parse(
+        JSON.stringify(obj, Object.getOwnPropertyNames(obj))
+      );
+    } catch {
+      return String(obj);
+    }
+  };
 
-function serializeErr(e: any) {
   const cause = e?.cause;
 
-  // AI SDK errors often tuck the good stuff in `cause`
   return {
     name: e?.name,
     message: e?.message,
     status: e?.status,
     code: e?.code,
 
-    // common AI SDK / fetch / OpenAI fields:
-    causeName: cause?.name,
-    causeMessage: cause?.message,
-    causeStatus: cause?.status ?? cause?.statusCode ?? cause?.response?.status,
+    // the AI SDK usually stores provider details here:
+    cause: cause ? safeStringify(cause) : null,
 
-    // sometimes the provider response body is here:
-    responseBody: cause?.responseBody ?? cause?.body ?? cause?.response?.body,
-
-    // sometimes it’s nested:
-    responseText:
-      cause?.response?.text
-        ? "[Function response.text]"
-        : undefined,
-
-    // last resort: dump keys so we can see where the data is
-    causeKeys: cause ? Object.keys(cause) : undefined,
-
-    // useful in dev:
-    stack: process.env.NODE_ENV !== "production" ? e?.stack : undefined,
+    // also dump the error itself (often has hidden fields):
+    self: safeStringify(e),
   };
 }
+
 
 
 function json(
@@ -763,6 +758,12 @@ try {
   try {
     result = await attempt();
   } catch (e2: any) {
+  const d1 = dumpError(e1);
+  const d2 = dumpError(e2);
+
+  console.error("ACEPREP AI CALL FAILED (1):", d1);
+  console.error("ACEPREP AI CALL FAILED (2):", d2);
+
   return json(
     req,
     {
@@ -772,14 +773,15 @@ try {
         ? {
             providerModelId,
             reportModelUsed,
-            first: serializeErr(e1),
-            second: serializeErr(e2),
+            first: d1,
+            second: d2,
           }
         : undefined,
     },
     500
   );
 }
+
 
 }
 
