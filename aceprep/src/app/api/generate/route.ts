@@ -20,18 +20,31 @@ const ALLOWED_ORIGINS = [
 
 function corsHeaders(req: Request) {
   const origin = req.headers.get("origin") || "";
-  // If you ever use credentials: "include", origin must be exact (not "*")
-  const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  const isAllowed = ALLOWED_ORIGINS.includes(origin);
 
-  return {
-    "Access-Control-Allow-Origin": allowOrigin,
+  const requestedHeaders = req.headers.get("access-control-request-headers");
+  const allowHeaders =
+    requestedHeaders || "Content-Type, Authorization, X-Aceprep-Debug";
+
+  const base: Record<string, string> = {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Headers": allowHeaders,
     "Access-Control-Max-Age": "86400",
-    Vary: "Origin",
+    Vary: "Origin, Access-Control-Request-Headers",
   };
+
+  // ✅ THIS is the missing part
+  if (isAllowed) {
+    base["Access-Control-Allow-Origin"] = origin;
+
+    // Only keep this if you actually use cookies / credentials: "include"
+    // base["Access-Control-Allow-Credentials"] = "true";
+  }
+
+  return base;
 }
+
+
 
 function json(
   req: Request,
