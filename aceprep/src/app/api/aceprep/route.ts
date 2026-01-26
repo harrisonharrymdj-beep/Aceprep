@@ -18,6 +18,11 @@ const ALLOWED_ORIGINS = [
   // add Vercel preview domains if needed
 ];
 
+function sanitizeText(s: string) {
+  // Remove ASCII control chars except \n \r \t
+  return s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+}
+
 function corsHeaders(req: Request) {
   const origin = req.headers.get("origin") || "";
 const isAllowed =
@@ -605,6 +610,14 @@ export async function POST(req: Request) {
     if ((input.materials || "").length > MATERIALS_MAX_CHARS) {
       return json(req, { ok: false, error: `materials too large (max ${MATERIALS_MAX_CHARS} chars)` }, 413);
     }
+const cleanInput = {
+  ...input,
+  materials: sanitizeText(input.materials ?? ""),
+  topic: input.topic ? sanitizeText(input.topic) : input.topic,
+  course: input.course ? sanitizeText(input.course) : input.course,
+  userAnswer: input.userAnswer ? sanitizeText(input.userAnswer) : input.userAnswer,
+  answerKey: input.answerKey ? sanitizeText(input.answerKey) : input.answerKey,
+};
 
     const combinedText =
       `${tool}\n${tier}\n${input.topic ?? ""}\n${input.course ?? ""}\n` +

@@ -229,6 +229,7 @@ export default function Page() {
       });
     }, 1000);
   }
+  
 
 async function onGenerate() {
   setError(null);
@@ -239,6 +240,8 @@ async function onGenerate() {
 
   if (needsVideoAd) startAdCountdown();
   setIsGenerating(true);
+
+  
 
   const payload = {
     tool: selectedTool,
