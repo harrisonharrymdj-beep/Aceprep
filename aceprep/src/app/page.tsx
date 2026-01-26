@@ -266,49 +266,51 @@ export default function Page() {
 
   let res: Response;
 
-  try {
-    res = await fetch("/api/aceprep", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-aceprep-debug": "1",
-      },
-      body: JSON.stringify(payload),
-      cache: "no-store",
-    });
-  } catch (e) {
-    console.error("FETCH THREW (never reached server)", e);
-    setError("Network error. Please retry.");
-    setIsGenerating(false);
-    return;
-  }
+try {
+  res = await fetch("/api/aceprep", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-aceprep-debug": "1",
+    },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+} catch (e) {
+  console.error("FETCH THREW (never reached server):", e);
+  setError("Network error (request did not reach server).");
+  setIsGenerating(false);
+  return;
+}
 
-  console.log("FETCH RETURNED", res.status);
+const rawText = await res.text();
 
-  // Read raw text first (so even non-JSON errors are visible)
-  const rawText = await res.text();
+let data: any = null;
+try {
+  data = JSON.parse(rawText);
+} catch {
+  // non-json response
+}
 
-  let json: any = null;
-  try {
-    json = JSON.parse(rawText);
-  } catch {
-    // keep json=null and rawText available
-  }
+console.log("ACEPREP RESPONSE STATUS:", res.status);
+console.log("ACEPREP RAW RESPONSE:", rawText);
 
-  // If server returned non-2xx, show the real reason
-  if (!res.ok || json?.ok === false) {
-    console.error("AcePrep API failed:", res.status, json ?? rawText);
+if (!res.ok || data?.ok === false) {
+  console.error("AcePrep API failed:", res.status, data ?? rawText);
+  setError(
+    data?.error ||
+      data?.message ||
+      data?.debug?.second?.message ||
+      data?.debug?.first?.message ||
+      rawText ||
+      `AcePrep failed (${res.status})`
+  );
+  setIsGenerating(false);
+  return;
+}
 
-    const msg =
-      json?.error ||
-      json?.message ||
-      (typeof rawText === "string" && rawText.slice(0, 200)) ||
-      (res.status === 429 ? "You’re sending requests too fast. Please slow down." : "Something went wrong.");
-
-    setError(msg);
-    setIsGenerating(false);
-    return;
-  }
+// success
+const json = data;
 
   // At this point we have a successful JSON response
   setModelUsed(json.modelUsed ?? null);
