@@ -41,6 +41,37 @@ if (isAllowed && origin) {
   return base;
 }
 
+function serializeErr(e: any) {
+  const cause = e?.cause;
+
+  // AI SDK errors often tuck the good stuff in `cause`
+  return {
+    name: e?.name,
+    message: e?.message,
+    status: e?.status,
+    code: e?.code,
+
+    // common AI SDK / fetch / OpenAI fields:
+    causeName: cause?.name,
+    causeMessage: cause?.message,
+    causeStatus: cause?.status ?? cause?.statusCode ?? cause?.response?.status,
+
+    // sometimes the provider response body is here:
+    responseBody: cause?.responseBody ?? cause?.body ?? cause?.response?.body,
+
+    // sometimes it’s nested:
+    responseText:
+      cause?.response?.text
+        ? "[Function response.text]"
+        : undefined,
+
+    // last resort: dump keys so we can see where the data is
+    causeKeys: cause ? Object.keys(cause) : undefined,
+
+    // useful in dev:
+    stack: process.env.NODE_ENV !== "production" ? e?.stack : undefined,
+  };
+}
 
 
 function json(
@@ -732,23 +763,24 @@ try {
   try {
     result = await attempt();
   } catch (e2: any) {
-    // show safe debug details
-    return json(
-      req,
-      {
-        ok: false,
-        error: "Generation failed. Please retry.",
-        debug:
-          debugEnabled
-            ? {
-                first: { name: e1?.name, message: e1?.message, status: e1?.status },
-                second: { name: e2?.name, message: e2?.message, status: e2?.status },
-              }
-            : undefined,
-      },
-      500
-    );
-  }
+  return json(
+    req,
+    {
+      ok: false,
+      error: "Generation failed. Please retry.",
+      debug: debugEnabled
+        ? {
+            providerModelId,
+            reportModelUsed,
+            first: serializeErr(e1),
+            second: serializeErr(e2),
+          }
+        : undefined,
+    },
+    500
+  );
+}
+
 }
 
 
