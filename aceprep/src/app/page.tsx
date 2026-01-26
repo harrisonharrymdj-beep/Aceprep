@@ -231,125 +231,115 @@ export default function Page() {
   }
 
   async function onGenerate() {
-    setError(null);
-    setApiResult(null);
-    setPolicyRefused(null);
-    setModelUsed(null);
-    setLimits(null);
+  setError(null);
+  setApiResult(null);
+  setPolicyRefused(null);
+  setModelUsed(null);
+  setLimits(null);
 
-    // Start ad overlay immediately (but DO NOT wait to fire API)
-    if (needsVideoAd) startAdCountdown();
+  // Start ad overlay immediately (but DO NOT wait to fire API)
+  if (needsVideoAd) startAdCountdown();
 
-    setIsGenerating(true);
+  setIsGenerating(true);
 
-    const payload = {
-      tool: selectedTool,
-      tier,
-      input: {
-        topic: topic.trim() || undefined,
-        course: course.trim() || undefined,
-        materials: materials,
-        userAnswer: userAnswer.trim() || undefined,
-        answerKey: answerKey.trim() || undefined,
-        constraints:
-          selectedTool === "planner" && examDate.trim()
-            ? { examDate: examDate.trim(), style: tier === "free" ? "concise" : "detailed" }
-            : { style: tier === "free" ? "concise" : "detailed" },
+  const payload = {
+    tool: selectedTool,
+    tier,
+    input: {
+      topic: topic.trim() || undefined,
+      course: course.trim() || undefined,
+      materials,
+      userAnswer: userAnswer.trim() || undefined,
+      answerKey: answerKey.trim() || undefined,
+      constraints:
+        selectedTool === "planner" && examDate.trim()
+          ? { examDate: examDate.trim(), style: tier === "free" ? "concise" : "detailed" }
+          : { style: tier === "free" ? "concise" : "detailed" },
+    },
+    meta: {
+      sessionId,
+      clientTs: Date.now(),
+    },
+  };
+
+  console.log("ABOUT TO FETCH /api/aceprep", payload);
+
+  let res: Response;
+
+  try {
+    res = await fetch("/api/aceprep", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-aceprep-debug": "1",
       },
-      meta: {
-        sessionId,
-        clientTs: Date.now(),
-      },
-    };
-
-    try {
-      const res = await fetch(`${getBaseUrl()}/api/aceprep`, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "x-aceprep-debug": "1", // ✅ forces debug body (even in prod)
-  },
-  body: JSON.stringify(payload),
-  cache: "no-store",
-});
-
-const rawText = await res.text(); // ✅ read raw first
-
-let jsonData: any = null;
-try {
-  jsonData = JSON.parse(rawText);
-} catch {
-  // if it's not JSON, keep rawText
-}
-
-if (!res.ok) {
-  console.error("AcePrep API failed:", res.status, jsonData ?? rawText);
-  throw new Error(
-    (jsonData && (jsonData.error || jsonData.message)) ||
-      `AcePrep failed (${res.status})`
-  );
-}
-
-return jsonData;
-
-
-
-      const json = await res.json();
-
-      if (!res.ok || json?.ok === false) {
-        const msg =
-          json?.error ||
-          json?.message ||
-          (res.status === 429 ? "You’re sending requests too fast. Please slow down." : "Something went wrong.");
-        setError(msg);
-        setIsGenerating(false);
-        return;
-      }
-
-      setModelUsed(json.modelUsed ?? null);
-      setLimits(json.limits ?? null);
-
-      // cooldown support
-      const cd = Number(json?.limits?.cooldownSeconds ?? 0);
-      if (cd > 0) startCooldown(cd);
-
-      // policy refusal support
-      const refused = !!json?.policy?.refused;
-      const reason = (json?.policy?.reason ?? null) as string | null;
-      setPolicyRefused({ refused, reason });
-
-      // Hold output until BOTH:
-      // - API returned
-      // - Ad finished (if free heavy)
-      if (needsVideoAd) {
-        // If ad already finished, show immediately
-        if (adRemaining === 0) {
-          setApiResult(json);
-          setIsGenerating(false);
-          return;
-        }
-
-        // Otherwise, wait for ad to finish
-        const waitForAd = () =>
-          new Promise<void>((resolve) => {
-            const t = window.setInterval(() => {
-              if (adRemaining === 0) {
-                window.clearInterval(t);
-                resolve();
-              }
-            }, 250);
-          });
-
-        await waitForAd();
-      }
-
-      setApiResult(json);
-      setIsGenerating(false);
-    } catch {
-      setError("Network error. Please retry.");
-      setIsGenerating(false);
-    }
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    });
+  } catch (e) {
+    console.error("FETCH THREW (never reached server)", e);
+    setError("Network error. Please retry.");
+    setIsGenerating(false);
+    return;
   }
+
+  console.log("FETCH RETURNED", res.status);
+
+  // Read raw text first (so even non-JSON errors are visible)
+  const rawText = await res.text();
+
+  let json: any = null;
+  try {
+    json = JSON.parse(rawText);
+  } catch {
+    // keep json=null and rawText available
+  }
+
+  // If server returned non-2xx, show the real reason
+  if (!res.ok || json?.ok === false) {
+    console.error("AcePrep API failed:", res.status, json ?? rawText);
+
+    const msg =
+      json?.error ||
+      json?.message ||
+      (typeof rawText === "string" && rawText.slice(0, 200)) ||
+      (res.status === 429 ? "You’re sending requests too fast. Please slow down." : "Something went wrong.");
+
+    setError(msg);
+    setIsGenerating(false);
+    return;
+  }
+
+  // At this point we have a successful JSON response
+  setModelUsed(json.modelUsed ?? null);
+  setLimits(json.limits ?? null);
+
+  // cooldown support
+  const cd = Number(json?.limits?.cooldownSeconds ?? 0);
+  if (cd > 0) startCooldown(cd);
+
+  // policy refusal support
+  const refused = !!json?.policy?.refused;
+  const reason = (json?.policy?.reason ?? null) as string | null;
+  setPolicyRefused({ refused, reason });
+
+  // Hold output until ad finishes (free heavy tools)
+  if (needsVideoAd) {
+    await new Promise<void>((resolve) => {
+      const t = window.setInterval(() => {
+        // IMPORTANT: read current value from state indirectly by checking DOM state flag
+        // simplest: wait until overlay is closed
+        if (!showAdOverlay) {
+          window.clearInterval(t);
+          resolve();
+        }
+      }, 250);
+    });
+  }
+
+  setApiResult(json);
+  setIsGenerating(false);
+}
 
   async function copyOutput() {
     try {
