@@ -765,16 +765,30 @@ export async function POST(req: Request) {
       200
     );
   } catch (err: any) {
-    if (err?.status === 429) {
-      return json(
-        req,
-        { ok: false, error: "Too many requests. Please slow down.", retryAfterSeconds: err.retryAfter ?? 30 },
-        429,
-        { "Retry-After": String(err.retryAfter ?? 30) }
-      );
-    }
-    return json(req, { ok: false, error: "Unexpected error. Please retry." }, 500);
-  }
+  const isRate = err?.status === 429;
+  const status = isRate ? 429 : 500;
+
+  const debug =
+    req.headers.get("x-aceprep-debug") === "1" ||
+    process.env.NODE_ENV !== "production"
+      ? {
+          name: err?.name,
+          message: err?.message,
+          status: err?.status,
+        }
+      : undefined;
+
+  return json(
+    req,
+    {
+      ok: false,
+      error: isRate ? "Too many requests. Please slow down." : "Unexpected error. Please retry.",
+      debug,
+    },
+    status,
+    isRate ? { "Retry-After": String(err.retryAfter ?? 30) } : {}
+  );
+}
 }
 
 export async function GET(req: Request) {
