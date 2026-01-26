@@ -20,7 +20,8 @@ const ALLOWED_ORIGINS = [
 
 function corsHeaders(req: Request) {
   const origin = req.headers.get("origin") || "";
-  const isAllowed = ALLOWED_ORIGINS.includes(origin);
+const isAllowed =
+  ALLOWED_ORIGINS.includes(origin) || origin.endsWith(".vercel.app");
 
   const requestedHeaders = req.headers.get("access-control-request-headers");
   const allowHeaders =
@@ -727,15 +728,32 @@ export async function POST(req: Request) {
     };
 
     let result: Awaited<ReturnType<typeof attempt>> | null = null;
-    try {
-      result = await attempt();
-    } catch {
-      try {
-        result = await attempt();
-      } catch {
-        return json(req, { ok: false, error: "Generation failed. Please retry." }, 500);
-      }
-    }
+
+try {
+  result = await attempt();
+} catch (e1: any) {
+  try {
+    result = await attempt();
+  } catch (e2: any) {
+    // show safe debug details
+    return json(
+      req,
+      {
+        ok: false,
+        error: "Generation failed. Please retry.",
+        debug:
+          debugEnabled
+            ? {
+                first: { name: e1?.name, message: e1?.message, status: e1?.status },
+                second: { name: e2?.name, message: e2?.message, status: e2?.status },
+              }
+            : undefined,
+      },
+      500
+    );
+  }
+}
+
 
     // Increment free heavy usage
     if (tier === "free" && isHeavy) {
