@@ -313,6 +313,7 @@ function schemaForTool(tool: Tool) {
  * 5) Helpers: IP, Limits, Guardrails
  * -----------------------------
  */
+
 async function getIP(): Promise<string> {
   const h = await headers();
   const xff = h.get("x-forwarded-for");

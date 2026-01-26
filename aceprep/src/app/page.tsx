@@ -118,6 +118,18 @@ function makeSessionId() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
+function getBaseUrl() {
+  // Browser
+  if (typeof window !== "undefined") return "";
+
+  // Server (Vercel/Prod)
+  if (process.env.NEXT_PUBLIC_APP_URL) return process.env.NEXT_PUBLIC_APP_URL;
+
+  // Server (local dev)
+  return "http://localhost:3000";
+}
+
+
 export default function Page() {
   const [selectedTool, setSelectedTool] = useState<Tool>(DEFAULT_TOOL);
   const [tier, setTier] = useState<Tier>("free");
@@ -251,11 +263,13 @@ export default function Page() {
     };
 
     try {
-      const res = await fetch("/api/aceprep", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const res = await fetch(`${getBaseUrl()}/api/aceprep`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(payload),
+  cache: "no-store",
+});
+
 
       const json = await res.json();
 
