@@ -230,16 +230,14 @@ export default function Page() {
     }, 1000);
   }
 
-  async function onGenerate() {
+async function onGenerate() {
   setError(null);
   setApiResult(null);
   setPolicyRefused(null);
   setModelUsed(null);
   setLimits(null);
 
-  // Start ad overlay immediately (but DO NOT wait to fire API)
   if (needsVideoAd) startAdCountdown();
-
   setIsGenerating(true);
 
   const payload = {
@@ -262,86 +260,81 @@ export default function Page() {
     },
   };
 
-  console.log("ABOUT TO FETCH /api/aceprep", payload);
-
   let res: Response;
 
-try {
-  res = await fetch("/api/aceprep", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-aceprep-debug": "1",
-    },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-} catch (e) {
-  console.error("FETCH THREW (never reached server):", e);
-  setError("Network error (request did not reach server).");
-  setIsGenerating(false);
-  return;
-}
+  try {
+    res = await fetch("/api/aceprep", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-aceprep-debug": "1",
+      },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    });
+  } catch (e) {
+    console.log("FETCH THREW (never reached server):", e);
+    setError("Network error (request did not reach server).");
+    setIsGenerating(false);
+    return;
+  }
 
-const rawText = await res.text();
+  const rawText = await res.text();
 
-let data: any = null;
-try {
-  data = JSON.parse(rawText);
-} catch {
-  // non-json response
-}
+  let json: any = null;
+  try {
+    json = JSON.parse(rawText);
+  } catch {
+    // keep rawText
+  }
 
-console.log("ACEPREP RESPONSE STATUS:", res.status);
-console.log("ACEPREP RAW RESPONSE:", rawText);
+  // IMPORTANT: use console.log to avoid Next devtools red error overlay noise
+  console.log("ACEPREP STATUS:", res.status);
+  console.log("ACEPREP RAW:", rawText);
 
-if (!res.ok || data?.ok === false) {
-  console.error("AcePrep API failed:", res.status, data ?? rawText);
-  setError(
-    data?.error ||
-      data?.message ||
-      data?.debug?.second?.message ||
-      data?.debug?.first?.message ||
+  if (!res.ok || json?.ok === false) {
+    // show the real server message in the UI
+    const msg =
+      json?.error ||
+      json?.message ||
+      json?.debug?.second?.message ||
+      json?.debug?.first?.message ||
       rawText ||
-      `AcePrep failed (${res.status})`
-  );
-  setIsGenerating(false);
-  return;
-}
+      `AcePrep failed (${res.status})`;
 
-// success
-const json = data;
+    setError(msg);
+    setIsGenerating(false);
+    return;
+  }
 
-  // At this point we have a successful JSON response
+  // success path
   setModelUsed(json.modelUsed ?? null);
   setLimits(json.limits ?? null);
 
-  // cooldown support
   const cd = Number(json?.limits?.cooldownSeconds ?? 0);
   if (cd > 0) startCooldown(cd);
 
-  // policy refusal support
   const refused = !!json?.policy?.refused;
   const reason = (json?.policy?.reason ?? null) as string | null;
   setPolicyRefused({ refused, reason });
 
-  // Hold output until ad finishes (free heavy tools)
   if (needsVideoAd) {
-    await new Promise<void>((resolve) => {
-      const t = window.setInterval(() => {
-        // IMPORTANT: read current value from state indirectly by checking DOM state flag
-        // simplest: wait until overlay is closed
-        if (!showAdOverlay) {
-          window.clearInterval(t);
-          resolve();
-        }
-      }, 250);
-    });
+    if (adRemaining !== 0) {
+      await new Promise<void>((resolve) => {
+        const t = window.setInterval(() => {
+          if (adRemaining === 0) {
+            window.clearInterval(t);
+            resolve();
+          }
+        }, 250);
+      });
+    }
   }
 
   setApiResult(json);
   setIsGenerating(false);
 }
+
 
   async function copyOutput() {
     try {
