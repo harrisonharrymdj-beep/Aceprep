@@ -6,6 +6,20 @@ import { openai } from "@ai-sdk/openai";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const SOFT_LIMIT = 3500;
+
+const TOKEN_MANAGEMENT_RULES = `
+TOKEN MANAGEMENT RULES:
+- Target a maximum of ${SOFT_LIMIT} tokens.
+- If approaching this limit:
+  • Finish the current section cleanly
+  • Complete any open arrays or objects
+  • Do NOT start new major sections
+  • Shorten prose if needed, but NEVER remove required fields
+- You may exceed ${SOFT_LIMIT} slightly to finish thoughts,
+  but must stay under 5000 tokens total.
+- NEVER truncate JSON or leave schema-required fields incomplete.
+`;
 /**
  * -----------------------------
  * 0) CORS (Fixes "network error" from browser)
@@ -482,19 +496,25 @@ function baseSystemPrompt(tool: Tool, tier: Tier, hasAnswerKey: boolean) {
     "For study guides: include a 'what to study first' ordering and active recall questions WITHOUT answers.",
     "For formula sheets: include units and assumptions where applicable; include when-to-use and common mistakes.",
     "Brand line to include in normal helpful outputs (not refusals): " + BRAND_LINE,
+
     tool === "reviewer" && !hasAnswerKey
       ? "Reviewer special rule: answerKey is missing. You may explain mistakes, give hints, and show reasoning checks, but you MUST NOT provide final answers. Set finalAnswerProvided=false."
       : tool === "reviewer" && hasAnswerKey
       ? "Reviewer rule: answerKey is provided. You may confirm correctness and explain why. If providing final answers, they must match the key."
       : "",
+
     tier === "free"
       ? "User is on FREE tier. Responses must be efficient and avoid unnecessary verbosity."
       : "User is on PRO tier. You may be more detailed if helpful.",
+
+    TOKEN_MANAGEMENT_RULES, // ✅ ADD HERE
+
     "Return ONLY valid JSON that matches the required schema for this tool.",
   ]
     .filter(Boolean)
     .join("\n");
 }
+
 
 function userPrompt(tool: Tool, input: z.infer<typeof InputSchema>) {
   return [
@@ -619,8 +639,8 @@ const cleanInput = {
 };
 
     const combinedText =
-      `${tool}\n${tier}\n${input.topic ?? ""}\n${input.course ?? ""}\n` +
-      `${input.materials ?? ""}\n${input.userAnswer ?? ""}\n${input.answerKey ?? ""}`;
+  `${tool}\n${tier}\n${cleanInput.topic ?? ""}\n${cleanInput.course ?? ""}\n` +
+  `${cleanInput.materials ?? ""}\n${cleanInput.userAnswer ?? ""}\n${cleanInput.answerKey ?? ""}`;
 
     // Guardrails
     if (detectJailbreak(combinedText)) {
@@ -686,7 +706,7 @@ const cleanInput = {
       );
     }
 
-    if (detectAcademicDishonesty(input)) {
+    if (detectAcademicDishonesty(cleanInput)) {
       const latencyMs = Date.now() - start;
       const base = refusal("academic dishonesty request", "dishonesty");
       return json(
@@ -734,7 +754,7 @@ const cleanInput = {
     const { providerModelId, reportModelUsed } = pickModel(tool);
     const hasAnswerKey = !!(input.answerKey && input.answerKey.trim().length > 0);
     const sys = baseSystemPrompt(tool, tier, hasAnswerKey);
-    const prompt = userPrompt(tool, input);
+const prompt = userPrompt(tool, cleanInput);
     const schema = schemaForTool(tool);
 
     const attempt = async () => {
@@ -745,6 +765,7 @@ const cleanInput = {
           system: sys,
           prompt,
           temperature: 0.2,
+          maxOutputTokens: 5000, //hard cap
         });
 
         if (!hasAnswerKey && res.object.finalAnswerProvided !== false) {
@@ -759,6 +780,7 @@ const cleanInput = {
         system: sys,
         prompt,
         temperature: 0.2,
+        maxOutputTokens: 5000, //hard cap
       });
     };
 
