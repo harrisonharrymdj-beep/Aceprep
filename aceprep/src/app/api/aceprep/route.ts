@@ -35,13 +35,9 @@ const isAllowed =
   };
 
   // ✅ THIS is the missing part
-  if (isAllowed) {
-    base["Access-Control-Allow-Origin"] = origin;
-
-    // Only keep this if you actually use cookies / credentials: "include"
-    // base["Access-Control-Allow-Credentials"] = "true";
-  }
-
+if (isAllowed && origin) {
+  base["Access-Control-Allow-Origin"] = origin;
+}
   return base;
 }
 
