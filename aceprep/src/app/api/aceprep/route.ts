@@ -32,6 +32,16 @@ const ALLOWED_ORIGINS = [
   // add Vercel preview domains if needed
 ];
 
+function keyFingerprint() {
+  const k = process.env.OPENAI_API_KEY || "";
+  return {
+    present: !!k,
+    len: k.length,
+    head: k.slice(0, 8),
+    tail: k.slice(-4),
+  };
+}
+
 function sanitizeText(s: string) {
   // Remove ASCII control chars except \n \r \t
   return s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
@@ -810,22 +820,26 @@ try {
   console.error("ACEPREP AI CALL FAILED (1):", d1);
   console.error("ACEPREP AI CALL FAILED (2):", d2);
 
-  return json(
-    req,
-    {
-      ok: false,
-      error: "Generation failed. Please retry.",
-      debug: debugEnabled
-        ? {
-            providerModelId,
-            reportModelUsed,
-            first: d1,
-            second: d2,
-          }
-        : undefined,
-    },
-    500
-  );
+  const keyFp = keyFingerprint();
+
+return json(
+  req,
+  {
+    ok: false,
+    error: "Generation failed. Please retry.",
+    debug: debugEnabled
+      ? {
+          providerModelId,
+          reportModelUsed,
+          keyFp, // 👈 ADD THIS
+          first: d1,
+          second: d2,
+        }
+      : undefined,
+  },
+  500
+);
+
 }
 
 
