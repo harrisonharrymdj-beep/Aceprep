@@ -118,6 +118,33 @@ function makeSessionId() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
+function track(event: string, payload?: Record<string, any>) {
+  // Phase 1: stub analytics (console) + optional localStorage queue
+  try {
+    const item = {
+      event,
+      payload: payload ?? {},
+      ts: Date.now(),
+    };
+
+    // Console for dev visibility
+    if (process.env.NODE_ENV !== "production") {
+      // eslint-disable-next-line no-console
+      console.log("[track]", item);
+    }
+
+    // Optional queue for later upload
+    if (typeof window !== "undefined") {
+      const key = "aceprep_events";
+      const prev = JSON.parse(window.localStorage.getItem(key) || "[]");
+      prev.push(item);
+      window.localStorage.setItem(key, JSON.stringify(prev.slice(-500))); // cap
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function getBaseUrl() {
   // Browser
   if (typeof window !== "undefined") return "";
@@ -127,6 +154,14 @@ function getBaseUrl() {
 
   // Server (local dev)
   return "http://localhost:3000";
+}
+
+function AdImpressionPing({ event, slot }: { event: string; slot: string }) {
+  useEffect(() => {
+    track(event, { slot });
+  }, [event, slot]);
+
+  return null;
 }
 
 
@@ -161,20 +196,17 @@ export default function Page() {
   const isHeavyTool = toolMeta.heavy;
   const needsVideoAd = tier === "free" && isHeavyTool;
 
-  const canGenerate = useMemo(() => {
-    if (cooldownRemaining > 0) return false;
-    if (isGenerating) return false;
+const canGenerate = useMemo(() => {
+  if (cooldownRemaining > 0) return false;
+  if (isGenerating) return false;
 
-    // Required inputs
-    if (toolMeta.needs.materials && materials.trim().length === 0) return false;
+  if (toolMeta.needs.materials && materials.trim().length === 0) return false;
+  if (selectedTool === "planner" && examDate.trim().length === 0) return false;
+  if (selectedTool === "reviewer" && userAnswer.trim().length === 0) return false;
 
-    if (selectedTool === "planner" && examDate.trim().length === 0) return false;
+  return true;
+}, [cooldownRemaining, isGenerating, toolMeta.needs.materials, materials, selectedTool, examDate, userAnswer]);
 
-    if (selectedTool === "reviewer" && userAnswer.trim().length === 0) return false;
-    // answerKey is optional in backend schema; keep it optional here too.
-    // but show field.
-    return true;
-  }, [cooldownRemaining, isGenerating, toolMeta.needs.materials, materials, selectedTool, examDate, userAnswer]);
 
   // Create/keep a sessionId for MVP
   const sessionId = useMemo(() => {
@@ -187,6 +219,12 @@ export default function Page() {
     return created;
   }, []);
 
+  const adRemainingRef = useRef(0);
+useEffect(() => {
+  adRemainingRef.current = adRemaining;
+}, [adRemaining]);
+
+
   // Cleanup intervals on unmount
   useEffect(() => {
     return () => {
@@ -195,23 +233,27 @@ export default function Page() {
     };
   }, []);
 
-  function startAdCountdown() {
-    setShowAdOverlay(true);
-    setAdRemaining(AD_SECONDS);
+function startAdCountdown() {
+  track("ad_video_started", { tool: selectedTool, tier, seconds: AD_SECONDS });
 
-    if (adTimerRef.current) window.clearInterval(adTimerRef.current);
-    adTimerRef.current = window.setInterval(() => {
-      setAdRemaining((s) => {
-        const next = Math.max(0, s - 1);
-        if (next === 0) {
-          if (adTimerRef.current) window.clearInterval(adTimerRef.current);
-          adTimerRef.current = null;
-          setShowAdOverlay(false);
-        }
-        return next;
-      });
-    }, 1000);
-  }
+  setShowAdOverlay(true);
+  setAdRemaining(AD_SECONDS);
+
+  if (adTimerRef.current) window.clearInterval(adTimerRef.current);
+  adTimerRef.current = window.setInterval(() => {
+    setAdRemaining((s) => {
+      const next = Math.max(0, s - 1);
+      if (next === 0) {
+        if (adTimerRef.current) window.clearInterval(adTimerRef.current);
+        adTimerRef.current = null;
+        setShowAdOverlay(false);
+        track("ad_video_completed", { tool: selectedTool, tier, seconds: AD_SECONDS });
+      }
+      return next;
+    });
+  }, 1000);
+}
+
 
   function startCooldown(seconds: number) {
     if (seconds <= 0) return;
@@ -232,16 +274,27 @@ export default function Page() {
   
 
 async function onGenerate() {
+  // Blocked by cooldown
+  if (cooldownRemaining > 0) {
+    track("generation_blocked_cooldown", {
+      tool: selectedTool,
+      tier,
+      cooldownRemaining,
+    });
+    return;
+  }
+
   setError(null);
   setApiResult(null);
   setPolicyRefused(null);
   setModelUsed(null);
   setLimits(null);
 
+  // IMPORTANT: start ad overlay immediately (free + heavy),
+  // but DO NOT wait before firing the API request.
   if (needsVideoAd) startAdCountdown();
-  setIsGenerating(true);
 
-  
+  setIsGenerating(true);
 
   const payload = {
     tool: selectedTool,
@@ -262,6 +315,8 @@ async function onGenerate() {
       clientTs: Date.now(),
     },
   };
+
+  track("generation_started", { tool: selectedTool, tier, heavy: isHeavyTool });
 
   let res: Response;
 
@@ -291,12 +346,10 @@ async function onGenerate() {
     // keep rawText
   }
 
-  // IMPORTANT: use console.log to avoid Next devtools red error overlay noise
   console.log("ACEPREP STATUS:", res.status);
   console.log("ACEPREP RAW:", rawText);
 
   if (!res.ok || json?.ok === false) {
-    // show the real server message in the UI
     const msg =
       json?.error ||
       json?.message ||
@@ -307,6 +360,12 @@ async function onGenerate() {
 
     setError(msg);
     setIsGenerating(false);
+
+    // If request fails, kill overlay
+    if (needsVideoAd) {
+      setShowAdOverlay(false);
+      setAdRemaining(0);
+    }
     return;
   }
 
@@ -321,22 +380,29 @@ async function onGenerate() {
   const reason = (json?.policy?.reason ?? null) as string | null;
   setPolicyRefused({ refused, reason });
 
+  // HOLD OUTPUT until ad finishes (if needed)
   if (needsVideoAd) {
-    if (adRemaining !== 0) {
-      await new Promise<void>((resolve) => {
-        const t = window.setInterval(() => {
-          if (adRemaining === 0) {
-            window.clearInterval(t);
-            resolve();
-          }
-        }, 250);
-      });
-    }
+    await new Promise<void>((resolve) => {
+      const t = window.setInterval(() => {
+        if (adRemainingRef.current === 0) {
+          window.clearInterval(t);
+          resolve();
+        }
+      }, 250);
+    });
   }
+
+  track("generation_completed", {
+    tool: selectedTool,
+    tier,
+    heavy: isHeavyTool,
+    modelUsed: json?.modelUsed ?? null,
+  });
 
   setApiResult(json);
   setIsGenerating(false);
 }
+
 
 
   async function copyOutput() {
@@ -348,8 +414,9 @@ async function onGenerate() {
     }
   }
 
+
   const showStationaryAds = true; // MVP
-  const showGeneratingOverlay = isGenerating && needsVideoAd; // ad overlay handles generating state too
+  const showGeneratingOverlay = showAdOverlay;
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -800,8 +867,9 @@ async function onGenerate() {
         {/* Footer ads (2) */}
         {showStationaryAds ? (
           <div className="mt-8 grid gap-3 sm:grid-cols-2">
-            <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-            <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+            <StationaryAdSlot title="Ad" subtitle="Sponsored" slotLocation="footer" />
+            <StationaryAdSlot title="Ad" subtitle="Sponsored" slotLocation="footer" />
+
           </div>
         ) : null}
 
@@ -809,12 +877,14 @@ async function onGenerate() {
       </section>
 
       {/* Video ad overlay */}
-      {showGeneratingOverlay || showAdOverlay ? (
-        <AdOverlay
-          remaining={adRemaining}
-          showAlmostDone={isGenerating && !!apiResult === false && adRemaining === 0}
-        />
-      ) : null}
+      {/* Video ad overlay */}
+    {showAdOverlay ? (
+  <AdOverlay
+    remaining={adRemaining}
+    showAlmostDone={isGenerating && !apiResult && adRemaining === 0}
+  />
+) : null}
+
     </main>
   );
 }
@@ -928,24 +998,39 @@ function MiniRow({ title }: { title: string }) {
   );
 }
 
-function StationaryAdSlot({ title, subtitle, tall }: { title: string; subtitle: string; tall?: boolean }) {
+function StationaryAdSlot({
+  title,
+  subtitle,
+  tall,
+  slotLocation = "footer",
+}: {
+  title: string;
+  subtitle: string;
+  tall?: boolean;
+  slotLocation?: "sidebar" | "footer";
+}) {
   return (
     <div className={cn("rounded-3xl border p-4", tall ? "min-h-[220px]" : "min-h-[110px]")}>
+      <AdImpressionPing
+        event={slotLocation === "sidebar" ? "ad_impression_sidebar" : "ad_impression_footer"}
+        slot={`${slotLocation}:${title}`}
+      />
+
       <div className="flex items-center justify-between">
         <Badge variant="outline" className="rounded-full">
           Ad
         </Badge>
         <span className="text-xs text-muted-foreground">{subtitle}</span>
       </div>
+
       <div className="mt-3 space-y-2">
         <p className="text-sm font-medium">{title}</p>
-        <p className="text-xs text-muted-foreground">
-          Static placement (no animation). Replace with your ad network later.
-        </p>
+        <p className="text-xs text-muted-foreground">Static placement (no animation). Replace with your ad network later.</p>
       </div>
     </div>
   );
 }
+
 
 function SideRailAds({ showUpsell }: { showUpsell?: boolean }) {
   return (
@@ -959,8 +1044,8 @@ function SideRailAds({ showUpsell }: { showUpsell?: boolean }) {
           We only show short ads on heavy tools so everyone can study without paywalls.
         </CardContent>
       </Card>
-      <StationaryAdSlot title="Ad" subtitle="Sponsored" />
-      <StationaryAdSlot title="Ad" subtitle="Sponsored" />
+<StationaryAdSlot title="Ad" subtitle="Sponsored" slotLocation="sidebar" />
+<StationaryAdSlot title="Ad" subtitle="Sponsored" slotLocation="sidebar" />
       {showUpsell ? (
         <Card className="rounded-3xl">
           <CardHeader>
