@@ -41,6 +41,15 @@ function keyFingerprint() {
     tail: k.slice(-4),
   };
 }
+const rawKey = process.env.OPENAI_API_KEY ?? "";
+const keyFp = {
+  present: !!rawKey,
+  len: rawKey.length,
+  head: rawKey.slice(0, 7),
+  tail: rawKey.slice(-4),
+};
+
+console.log("ACEPREP KEY FP:", keyFp);
 
 function sanitizeText(s: string) {
   // Remove ASCII control chars except \n \r \t
