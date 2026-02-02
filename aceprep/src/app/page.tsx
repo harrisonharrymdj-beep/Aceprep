@@ -105,6 +105,8 @@ const DEFAULT_TOOL: Tool = "study_guide";
 
 const AD_SECONDS = 15;
 
+const adImpressionDedupe = new Set<string>();
+
 function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
@@ -118,13 +120,38 @@ function makeSessionId() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
+const FORBIDDEN_PAYLOAD_KEYS = new Set(["materials", "userAnswer", "answerKey", "raw", "rawText", "output", "data"]);
+
 function track(event: string, payload?: Record<string, any>) {
-  // Phase 1: stub analytics (console) + optional localStorage queue
   try {
+    const ts = Date.now();
+
+    // Minimal / safe payload scrub (flat metadata only)
+    const safePayload: Record<string, any> = {};
+    const input = payload ?? {};
+
+    for (const [k, v] of Object.entries(input)) {
+      if (FORBIDDEN_PAYLOAD_KEYS.has(k)) continue;
+      // Keep payload flat — drop nested objects/arrays
+      if (v && typeof v === "object") continue;
+      safePayload[k] = v;
+    }
+
+    const sessionId =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("aceprep_sessionId") || "unknown"
+        : "server";
+
+    const path = typeof window !== "undefined" ? window.location.pathname : "/";
+
     const item = {
       event,
-      payload: payload ?? {},
-      ts: Date.now(),
+      payload: safePayload,
+      ts,
+      sessionId,
+      path,
+      // Optional: userAgent (short). Server also sees UA headers.
+      userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
     };
 
     // Console for dev visibility
@@ -133,17 +160,63 @@ function track(event: string, payload?: Record<string, any>) {
       console.log("[track]", item);
     }
 
-    // Optional queue for later upload
+    // Optional localStorage queue (can remain)
     if (typeof window !== "undefined") {
       const key = "aceprep_events";
       const prev = JSON.parse(window.localStorage.getItem(key) || "[]");
-      prev.push(item);
-      window.localStorage.setItem(key, JSON.stringify(prev.slice(-500))); // cap
+      prev.push({ event, payload: safePayload, ts });
+      window.localStorage.setItem(key, JSON.stringify(prev.slice(-500)));
     }
+
+    // Fire-and-forget send
+    sendEvent(item);
   } catch {
     // ignore
   }
+
+  function sendEvent(item: {
+    event: string;
+    payload: Record<string, any>;
+    ts: number;
+    sessionId: string;
+    path: string;
+    userAgent?: string;
+  }) {
+    try {
+      if (typeof window === "undefined") return;
+
+      // Enforce standard props on every event (PostHog-friendly)
+      // NOTE: tier/tool are added by callers in payload already, but we don't force here.
+      const body = JSON.stringify({
+        event: item.event,
+        payload: item.payload,
+        ts: item.ts,
+        sessionId: item.sessionId,
+        path: item.path,
+        userAgent: item.userAgent,
+      });
+
+      // Prefer sendBeacon (doesn't block navigation)
+      const navAny: any = navigator;
+      if (typeof navAny.sendBeacon === "function") {
+        const blob = new Blob([body], { type: "application/json" });
+        navAny.sendBeacon("/api/track", blob);
+        return;
+      }
+
+      // Fallback fetch keepalive
+      fetch("/api/track", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // ignore
+    }
+  }
 }
+
 
 function getBaseUrl() {
   // Browser
@@ -158,11 +231,17 @@ function getBaseUrl() {
 
 function AdImpressionPing({ event, slot }: { event: string; slot: string }) {
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const path = window.location.pathname;
+    const key = `${path}:${event}:${slot}`;
+    if (adImpressionDedupe.has(key)) return;
+    adImpressionDedupe.add(key);
     track(event, { slot });
   }, [event, slot]);
 
   return null;
 }
+
 
 
 export default function Page() {
@@ -200,12 +279,33 @@ const canGenerate = useMemo(() => {
   if (cooldownRemaining > 0) return false;
   if (isGenerating) return false;
 
+  // materials required for all tools in your config
   if (toolMeta.needs.materials && materials.trim().length === 0) return false;
+
+  // planner
   if (selectedTool === "planner" && examDate.trim().length === 0) return false;
+
+  // reviewer
   if (selectedTool === "reviewer" && userAnswer.trim().length === 0) return false;
 
+  // essay proofread (essay text lives in userAnswer)
+  if (selectedTool === "essay_proofread" && userAnswer.trim().length === 0) return false;
+
+  // if you truly want answerKey REQUIRED because your TOOLS.needs says so:
+  // (BUT your UI says optional — so either enforce it here OR change TOOLS.needs.answerKey to false)
+  // if (selectedTool === "reviewer" && toolMeta.needs.answerKey && answerKey.trim().length === 0) return false;
+
   return true;
-}, [cooldownRemaining, isGenerating, toolMeta.needs.materials, materials, selectedTool, examDate, userAnswer]);
+}, [
+  cooldownRemaining,
+  isGenerating,
+  toolMeta.needs.materials,
+  materials,
+  selectedTool,
+  examDate,
+  userAnswer,
+  answerKey,
+]);
 
 
   // Create/keep a sessionId for MVP
@@ -234,10 +334,12 @@ useEffect(() => {
   }, []);
 
 function startAdCountdown() {
+  track("ad_overlay_shown", { tool: selectedTool, tier, seconds: AD_SECONDS });
   track("ad_video_started", { tool: selectedTool, tier, seconds: AD_SECONDS });
 
   setShowAdOverlay(true);
   setAdRemaining(AD_SECONDS);
+
 
   if (adTimerRef.current) window.clearInterval(adTimerRef.current);
   adTimerRef.current = window.setInterval(() => {
@@ -416,7 +518,6 @@ async function onGenerate() {
 
 
   const showStationaryAds = true; // MVP
-  const showGeneratingOverlay = showAdOverlay;
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -552,14 +653,16 @@ async function onGenerate() {
                           className="rounded-xl"
                           onClick={() => setTier("free")}
                         >
-                          Free
+                        Free
                         </Button>
-                        <Button
-                          size="sm"
-                          variant={tier === "pro" ? "default" : "ghost"}
-                          className="rounded-xl"
-                          onClick={() => setTier("pro")}
-                        >
+                          <Button
+                            variant={tier === "pro" ? "default" : "outline"}
+                            className="rounded-2xl"
+                            onClick={() => {
+                              track("pro_upgrade_clicked", { location: "header_upgrade", tier });
+                              setTier("pro");
+                            }}
+                          >
                           Pro
                         </Button>
                       </div>
@@ -812,7 +915,12 @@ async function onGenerate() {
                 <CardDescription>Remove the 15s overlay and unlock exports.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
-                <Button className="w-full rounded-2xl" asChild>
+                <Button
+                  className="w-full rounded-2xl"
+                  onClick={() => {
+                    track("pro_upgrade_clicked", { location: "tier_toggle", tier });
+                    setTier("pro");
+                  }}                >
                   <Link href="#pricing">Upgrade to Pro</Link>
                 </Button>
                 <p className="text-xs text-muted-foreground">Free tier is supported by ads on heavy tools.</p>
@@ -861,14 +969,16 @@ async function onGenerate() {
             ctaHref="/checkout?plan=pro"
             variant="default"
             highlight
+            onCtaClick={() => track("pro_upgrade_clicked", { location: "pricing", tier })}
           />
         </div>
 
         {/* Footer ads (2) */}
         {showStationaryAds ? (
           <div className="mt-8 grid gap-3 sm:grid-cols-2">
-            <StationaryAdSlot title="Ad" subtitle="Sponsored" slotLocation="footer" />
-            <StationaryAdSlot title="Ad" subtitle="Sponsored" slotLocation="footer" />
+            <StationaryAdSlot id="footer_1" title="Ad" subtitle="Sponsored" slotLocation="footer" />
+            <StationaryAdSlot id="footer_2" title="Ad" subtitle="Sponsored" slotLocation="footer" />
+
 
           </div>
         ) : null}
@@ -999,21 +1109,24 @@ function MiniRow({ title }: { title: string }) {
 }
 
 function StationaryAdSlot({
+  id,
   title,
   subtitle,
   tall,
   slotLocation = "footer",
 }: {
+  id: string;
   title: string;
   subtitle: string;
   tall?: boolean;
   slotLocation?: "sidebar" | "footer";
 }) {
+
   return (
     <div className={cn("rounded-3xl border p-4", tall ? "min-h-[220px]" : "min-h-[110px]")}>
       <AdImpressionPing
         event={slotLocation === "sidebar" ? "ad_impression_sidebar" : "ad_impression_footer"}
-        slot={`${slotLocation}:${title}`}
+        slot={`${slotLocation}:${id}`}
       />
 
       <div className="flex items-center justify-between">
@@ -1044,8 +1157,8 @@ function SideRailAds({ showUpsell }: { showUpsell?: boolean }) {
           We only show short ads on heavy tools so everyone can study without paywalls.
         </CardContent>
       </Card>
-<StationaryAdSlot title="Ad" subtitle="Sponsored" slotLocation="sidebar" />
-<StationaryAdSlot title="Ad" subtitle="Sponsored" slotLocation="sidebar" />
+<StationaryAdSlot id="sidebar_1" title="Ad" subtitle="Sponsored" slotLocation="sidebar" />
+<StationaryAdSlot id="sidebar_2" title="Ad" subtitle="Sponsored" slotLocation="sidebar" />
       {showUpsell ? (
         <Card className="rounded-3xl">
           <CardHeader>
@@ -1672,6 +1785,7 @@ function PricingCard({
   ctaHref,
   variant,
   highlight,
+  onCtaClick,
 }: {
   title: string;
   price: string;
@@ -1681,7 +1795,9 @@ function PricingCard({
   ctaHref: string;
   variant: "default" | "outline";
   highlight?: boolean;
+  onCtaClick?: () => void;
 }) {
+
   return (
     <Card className={cn("rounded-3xl", highlight ? "border-foreground/30 shadow-sm" : "")}>
       <CardHeader className="space-y-2">
@@ -1695,9 +1811,14 @@ function PricingCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <Button asChild className="w-full rounded-2xl" variant={variant === "default" ? "default" : "outline"}>
-          <Link href={ctaHref}>{ctaLabel}</Link>
-        </Button>
+        <Button
+        asChild
+        className="w-full rounded-2xl"
+        variant={variant === "default" ? "default" : "outline"}
+        onClick={onCtaClick}
+      >
+        <Link href={ctaHref}>{ctaLabel}</Link>
+      </Button>
         <ul className="space-y-2 text-sm text-muted-foreground">
           {bullets.map((b) => (
             <li key={b} className="flex items-start gap-2">
