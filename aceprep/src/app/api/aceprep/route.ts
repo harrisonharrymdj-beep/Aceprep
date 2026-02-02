@@ -6,20 +6,38 @@ import { openai } from "@ai-sdk/openai";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SOFT_LIMIT = 3500;
+const SOFT_LIMIT_FREE = 3500;
+const SOFT_LIMIT_PRO = 7000;
 
-const TOKEN_MANAGEMENT_RULES = `
+const MAX_OUT_FREE = 5000;   // hard cap
+const MAX_OUT_PRO  = 10000;  // hard cap (adjust as you want)
+
+function softLimitFor(tier: Tier) {
+  return tier === "pro" ? SOFT_LIMIT_PRO : SOFT_LIMIT_FREE;
+}
+
+function maxOutFor(tier: Tier) {
+  return tier === "pro" ? MAX_OUT_PRO : MAX_OUT_FREE;
+}
+
+function tokenManagementRules(tier: Tier) {
+  const soft = softLimitFor(tier);
+  const hard = maxOutFor(tier);
+
+  return `
 TOKEN MANAGEMENT RULES:
-- Target a maximum of ${SOFT_LIMIT} tokens.
+- Target a maximum of ${soft} tokens.
 - If approaching this limit:
   • Finish the current section cleanly
   • Complete any open arrays or objects
   • Do NOT start new major sections
   • Shorten prose if needed, but NEVER remove required fields
-- You may exceed ${SOFT_LIMIT} slightly to finish thoughts,
-  but must stay under 5000 tokens total.
+- You may exceed ${soft} slightly to finish thoughts,
+  but must stay under ${hard} tokens total.
 - NEVER truncate JSON or leave schema-required fields incomplete.
 `;
+}
+
 /**
  * -----------------------------
  * 0) CORS (Fixes "network error" from browser)
@@ -526,7 +544,7 @@ function baseSystemPrompt(tool: Tool, tier: Tier, hasAnswerKey: boolean) {
       ? "User is on FREE tier. Responses must be efficient and avoid unnecessary verbosity."
       : "User is on PRO tier. You may be more detailed if helpful.",
 
-    TOKEN_MANAGEMENT_RULES, // ✅ ADD HERE
+    tokenManagementRules(tier), // ✅ ADD HERE
 
     "Return ONLY valid JSON that matches the required schema for this tool.",
   ]
@@ -796,7 +814,7 @@ if (debugEnabled) {
           system: sys,
           prompt,
           temperature: 0.2,
-          maxOutputTokens: 5000, //hard cap
+          maxOutputTokens: maxOutFor(tier), //hard cap
         });
 
         if (!hasAnswerKey && res.object.finalAnswerProvided !== false) {
@@ -811,7 +829,7 @@ if (debugEnabled) {
         system: sys,
         prompt,
         temperature: 0.2,
-        maxOutputTokens: 5000, //hard cap
+        maxOutputTokens: maxOutFor(tier), //hard cap
       });
     };
 
