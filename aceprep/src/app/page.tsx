@@ -375,7 +375,18 @@ function startAdCountdown() {
       });
     }, 1000);
   }
-  
+async function fetchWithOneRetry(input: RequestInfo, init: RequestInit) {
+  const res = await fetch(input, init);
+
+  // Only retry server/transient errors
+  if ([500, 502, 503, 504].includes(res.status)) {
+    await new Promise((r) => setTimeout(r, 400));
+    return fetch(input, init);
+  }
+
+  return res;
+}
+
 
 async function onGenerate() {
   // Blocked by cooldown
@@ -425,15 +436,15 @@ async function onGenerate() {
   let res: Response;
 
   try {
-    res = await fetch("/api/aceprep", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-aceprep-debug": "1",
-      },
-      body: JSON.stringify(payload),
-      cache: "no-store",
-    });
+    res = await fetchWithOneRetry("/api/aceprep", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-aceprep-debug": "1",
+  },
+  body: JSON.stringify(payload),
+  cache: "no-store",
+});
   } catch (e) {
     console.log("FETCH THREW (never reached server):", e);
     setError("Network error (request did not reach server).");
