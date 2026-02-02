@@ -230,17 +230,19 @@ function getBaseUrl() {
 }
 
 function AdImpressionPing({ event, slot }: { event: string; slot: string }) {
+  const didSendRef = useRef(false);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const path = window.location.pathname;
-    const key = `${path}:${event}:${slot}`;
-    if (adImpressionDedupe.has(key)) return;
-    adImpressionDedupe.add(key);
+    if (didSendRef.current) return;
+
+    didSendRef.current = true;
     track(event, { slot });
   }, [event, slot]);
 
   return null;
 }
+
 
 
 
@@ -915,13 +917,16 @@ async function onGenerate() {
                 <CardDescription>Remove the 15s overlay and unlock exports.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
-                <Button
-                  className="w-full rounded-2xl"
-                  onClick={() => {
-                    track("pro_upgrade_clicked", { location: "tier_toggle", tier });
-                    setTier("pro");
-                  }}                >
-                  <Link href="#pricing">Upgrade to Pro</Link>
+                <Button className="w-full rounded-2xl" asChild>
+                  <Link
+                    href="#pricing"
+                    onClick={() => {
+                      track("pro_upgrade_clicked", { location: "ethics_upgrade", tier });
+                      setTier("pro");
+                    }}
+                  >
+                    Upgrade to Pro
+                  </Link>
                 </Button>
                 <p className="text-xs text-muted-foreground">Free tier is supported by ads on heavy tools.</p>
               </CardContent>
@@ -1811,14 +1816,11 @@ function PricingCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <Button
-        asChild
-        className="w-full rounded-2xl"
-        variant={variant === "default" ? "default" : "outline"}
-        onClick={onCtaClick}
-      >
-        <Link href={ctaHref}>{ctaLabel}</Link>
-      </Button>
+        <Button asChild className="w-full rounded-2xl" variant={variant === "default" ? "default" : "outline"}>
+          <Link href={ctaHref} onClick={onCtaClick}>
+            {ctaLabel}
+          </Link>
+        </Button>
         <ul className="space-y-2 text-sm text-muted-foreground">
           {bullets.map((b) => (
             <li key={b} className="flex items-start gap-2">
