@@ -230,18 +230,28 @@ function getBaseUrl() {
 }
 
 function AdImpressionPing({ event, slot }: { event: string; slot: string }) {
-  const didSendRef = useRef(false);
-
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (didSendRef.current) return;
 
-    didSendRef.current = true;
+    const path = window.location.pathname;
+    const key = `${path}:${event}:${slot}`;
+
+    // Persisted dedupe (survives strict-mode remounts)
+    const storeKey = "aceprep_ad_impressions";
+    const raw = window.sessionStorage.getItem(storeKey);
+    const seen: Record<string, true> = raw ? JSON.parse(raw) : {};
+
+    if (seen[key]) return;
+
+    seen[key] = true;
+    window.sessionStorage.setItem(storeKey, JSON.stringify(seen));
+
     track(event, { slot });
   }, [event, slot]);
 
   return null;
 }
+
 
 
 
